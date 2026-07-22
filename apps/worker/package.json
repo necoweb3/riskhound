@@ -17,7 +17,8 @@
     "@rugkiller/db": "workspace:*",
     "@rugkiller/shared": "workspace:*",
     "bullmq": "^4.17.0",
-    "ioredis": "^5.4.2"
+    "ioredis": "^5.4.2",
+    "viem": "^2.23.2"
   },
   "devDependencies": {
     "@types/node": "^22.12.0",
