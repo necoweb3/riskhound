@@ -1,0 +1,33 @@
+{
+  "name": "riskhound",
+  "version": "0.1.0",
+  "private": true,
+  "description": "RiskHound - evidence-based token security and cross-chain wallet intelligence built on Arc",
+  "scripts": {
+    "setup": "node scripts/setup.mjs",
+    "dev": "pnpm --parallel --filter @rugkiller/api --filter @rugkiller/worker --filter @rugkiller/web run dev",
+    "dev:api": "pnpm --filter @rugkiller/api dev",
+    "dev:worker": "pnpm --filter @rugkiller/worker dev",
+    "dev:web": "pnpm --filter @rugkiller/web dev",
+    "build": "pnpm -r run build",
+    "test": "pnpm -r run test",
+    "db:generate": "pnpm --filter @rugkiller/db generate",
+    "db:push": "pnpm --filter @rugkiller/db push",
+    "db:generate:postgres": "pnpm --filter @rugkiller/db generate:postgres",
+    "db:push:postgres": "pnpm --filter @rugkiller/db push:postgres",
+    "db:studio": "pnpm --filter @rugkiller/db studio",
+    "infra:up": "docker compose up -d",
+    "infra:down": "docker compose down",
+    "lint": "pnpm -r run lint",
+    "typecheck": "pnpm -r run typecheck",
+    "health": "node scripts/health.mjs",
+    "bridge:backfill": "node --env-file=.env scripts/backfill-cctp.mjs"
+  },
+  "devDependencies": {
+    "solc": "^0.8.30"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@9.15.0"
+}

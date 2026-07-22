@@ -1,0 +1,118 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-rugkiller}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-rugkiller}
+    volumes: [postgres-data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-rugkiller}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes: [redis-data:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    build:
+      context: .
+      args: { SERVICE: api }
+    environment: &backend-env
+      DATABASE_URL: postgresql://${POSTGRES_USER:-rugkiller}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-rugkiller}?schema=public
+      REDIS_URL: redis://redis:6379
+      REDIS_OPTIONAL: "false"
+    command: pnpm db:push:postgres
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  api:
+    build:
+      context: .
+      args: { SERVICE: api }
+    restart: unless-stopped
+    environment:
+      <<: *backend-env
+      NODE_ENV: production
+      API_PORT: 4000
+      ARC_RPC_URL: ${ARC_RPC_URL:-https://rpc.drpc.testnet.arc.network}
+      ARC_CHAIN_ID: 5042002
+      ARC_EXPLORER_API: https://testnet.arcscan.app/api
+      ARC_EXPLORER_V2: https://testnet.arcscan.app/api/v2
+      ARC_EXPLORER_URL: https://testnet.arcscan.app
+      PAYMENT_NETWORK: base
+      PAYMENT_CHAIN_ID: 8453
+      PAYMENT_RPC_URL: ${PAYMENT_RPC_URL:-https://mainnet.base.org}
+      PAYMENT_USDC_ADDRESS: 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
+      PAYMENT_RECIPIENT_ADDRESS: ${PAYMENT_RECIPIENT_ADDRESS}
+      X402_FACILITATOR_URL: https://gateway-api.circle.com
+      X402_ENABLED: ${X402_ENABLED:-true}
+      FREE_ANALYSES_PER_DAY: ${FREE_ANALYSES_PER_DAY:-10}
+      FREE_API_REQUESTS_PER_MINUTE: ${FREE_API_REQUESTS_PER_MINUTE:-30}
+      PRICE_BUY_SELL_SIM: ${PRICE_BUY_SELL_SIM:-0.10}
+      PRICE_FUNDING_GRAPH: ${PRICE_FUNDING_GRAPH:-0.20}
+      PRICE_FULL_REPORT: ${PRICE_FULL_REPORT:-0.50}
+      ADMIN_WALLETS: ${ADMIN_WALLETS}
+      JWT_SECRET: ${JWT_SECRET}
+      API_PUBLIC_URL: ${API_PUBLIC_URL}
+      WEB_PUBLIC_URL: ${WEB_PUBLIC_URL}
+      CORS_ORIGIN: ${WEB_PUBLIC_URL}
+    ports: ["4000:4000"]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+
+  worker:
+    build:
+      context: .
+      args: { SERVICE: worker }
+    restart: unless-stopped
+    environment:
+      <<: *backend-env
+      NODE_ENV: production
+      ARC_RPC_URL: ${ARC_RPC_URL:-https://rpc.drpc.testnet.arc.network}
+      ARC_CHAIN_ID: 5042002
+      ARC_EXPLORER_API: https://testnet.arcscan.app/api
+      ARC_EXPLORER_V2: https://testnet.arcscan.app/api/v2
+      ARC_INDEXER_POLL_MS: 60000
+      ROBINHOOD_INDEXER_POLL_MS: 120000
+      ANALYSIS_CONCURRENCY: 2
+      BRIDGE_INDEXER_API_URL: http://api:4000
+      BRIDGE_INDEXER_POLL_MS: 60000
+      OBSERVED_MAINNET_INDEXER_POLL_MS: 300000
+      BRIDGE_SETTLEMENT_POLL_MS: 60000
+      SOLANA_CCTP_POLL_MS: 120000
+      EVM_CCTP_BACKFILL_POLL_MS: 60000
+      SOLANA_RPC_URL: ${SOLANA_RPC_URL:-https://api.mainnet-beta.solana.com}
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+      api: { condition: service_started }
+
+  web:
+    build:
+      context: .
+      args:
+        SERVICE: web
+        NEXT_PUBLIC_API_URL: ${API_PUBLIC_URL}
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+      NEXT_PUBLIC_API_URL: ${API_PUBLIC_URL}
+    ports: ["3001:3001"]
+    depends_on: [api]
+
+volumes:
+  postgres-data:
+  redis-data:

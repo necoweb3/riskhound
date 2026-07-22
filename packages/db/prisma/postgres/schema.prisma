@@ -1,0 +1,391 @@
+// Generated from ../schema.prisma. Do not edit directly.
+generator client {
+  provider = "prisma-client-js"
+}
+
+// Default local: SQLite. For production Postgres, set provider/url via docs.
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Token {
+  id                 String    @id @default(cuid())
+  chain              String
+  address            String
+  name               String?
+  symbol             String?
+  decimals           Int?
+  totalSupply        String?
+  standard           String?
+  deployer           String?
+  deployTxHash       String?
+  deployBlock        BigInt?
+  deployTimestamp    DateTime?
+  owner              String?
+  isProxy            Boolean   @default(false)
+  isVerified         Boolean   @default(false)
+  templateHint       String?
+  bytecodeHash       String?
+  firstLiquidityUsd  Float?
+  liquidityUsd       Float?
+  holderCount        Int?
+  isActive           Boolean?
+  overallRisk        String?
+  confidence         String?
+  topSignalsJson     String    @default("[]")
+  hasRobinhoodLink   Boolean   @default(false)
+  analysisUpdatedAt  DateTime?
+  lastAnalyzedBlock  BigInt?
+  rawMeta            String?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  analyses     AnalysisRun[]
+  findings     Finding[]
+  holders      TokenHolder[]
+  pools        LiquidityPoolRow[]
+  events       RiskEvent[]
+  simulations  SimulationRun[]
+
+  @@unique([chain, address])
+  @@index([chain, deployTimestamp])
+  @@index([overallRisk])
+  @@index([deployer])
+}
+
+model AnalysisRun {
+  id            String   @id @default(cuid())
+  tokenId       String
+  token         Token    @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+  modelVersion  String
+  overallRisk   String
+  confidence    String
+  reportJson    String
+  lastBlock     BigInt?
+  dataSources   String
+  createdAt     DateTime @default(now())
+
+  @@index([tokenId, createdAt])
+}
+
+model Finding {
+  id                String   @id @default(cuid())
+  tokenId           String?
+  token             Token?   @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+  walletAddress     String?
+  chain             String
+  category          String
+  name              String
+  severity          String
+  status            String
+  summary           String
+  whyItMatters      String
+  controllerAddress String?
+  relatedFunction   String?
+  evidenceJson      String
+  source            String   @default("automatic")
+  manualDecision    String?
+  manualReason      String?
+  manualReviewer    String?
+  manualAt          DateTime?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([tokenId])
+  @@index([walletAddress, chain])
+  @@index([severity])
+}
+
+model TokenHolder {
+  id         String   @id @default(cuid())
+  tokenId    String
+  token      Token    @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+  address    String
+  balance    String
+  pct        Float?
+  isContract Boolean?
+  labelsJson String   @default("[]")
+  updatedAt  DateTime @updatedAt
+
+  @@unique([tokenId, address])
+  @@index([tokenId, pct])
+}
+
+model LiquidityPoolRow {
+  id            String   @id @default(cuid())
+  tokenId       String
+  token         Token    @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+  poolAddress   String
+  dex           String?
+  token0        String
+  token1        String
+  reserve0      String?
+  reserve1      String?
+  liquidityUsd  Float?
+  locked        Boolean?
+  lockUntil     DateTime?
+  burned        Boolean?
+  rawJson       String?
+  updatedAt     DateTime @updatedAt
+
+  @@unique([tokenId, poolAddress])
+}
+
+model SimulationRun {
+  id           String   @id @default(cuid())
+  tokenId      String
+  token        Token    @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+  canBuy       Boolean?
+  canSell      Boolean?
+  buyTaxBps    Int?
+  sellTaxBps   Int?
+  stepsJson    String
+  summary      String
+  method       String
+  dataComplete Boolean  @default(false)
+  createdAt    DateTime @default(now())
+
+  @@index([tokenId, createdAt])
+}
+
+model Wallet {
+  id           String   @id @default(cuid())
+  address      String
+  chain        String
+  firstSeenAt  DateTime?
+  lastSeenAt   DateTime?
+  txCount      Int?
+  labelsJson   String   @default("[]")
+  firstFunder  String?
+  historyLabel String?
+  rawJson      String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([chain, address])
+  @@index([address])
+}
+
+model CrossChainLinkRow {
+  id                  String   @id @default(cuid())
+  strength            String
+  fromChain           String
+  toChain             String
+  fromAddress         String
+  toAddress           String
+  reason              String
+  evidenceJson        String
+  relatedEventIdsJson String   @default("[]")
+  createdAt           DateTime @default(now())
+
+  @@index([fromAddress])
+  @@index([toAddress])
+  @@index([strength])
+}
+
+model RiskEvent {
+  id              String   @id @default(cuid())
+  chain           String
+  eventClass      String
+  title           String
+  detail          String?
+  tokenAddress    String?
+  tokenId         String?
+  token           Token?   @relation(fields: [tokenId], references: [id], onDelete: SetNull)
+  addressesJson   String   @default("[]")
+  confidence      String
+  autoDetected    Boolean  @default(true)
+  manualStatus    String   @default("none")
+  manualReason    String?
+  evidenceJson    String
+  txHashesJson    String   @default("[]")
+  occurredAt      DateTime
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([chain, occurredAt])
+  @@index([eventClass])
+  @@index([tokenAddress])
+}
+
+model GraphEdgeRow {
+  id           String   @id @default(cuid())
+  fingerprint  String   @unique
+  sourceId     String
+  targetId     String
+  sourceType   String
+  targetType   String
+  edgeType     String
+  strength     String
+  chain        String?
+  evidenceJson String
+  label        String?
+  confidence   String   @default("medium")
+  serviceExcluded Boolean @default(false)
+  createdAt    DateTime @default(now())
+
+  @@index([sourceId])
+  @@index([targetId])
+  @@index([edgeType])
+}
+
+model User {
+  id            String   @id @default(cuid())
+  walletAddress String   @unique
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  settingsJson  String?
+
+  watches  WatchlistItem[]
+  alerts   Alert[]
+  payments Payment[]
+  appeals  Appeal[]
+  apiKeys  ApiKey[]
+}
+
+model WatchlistItem {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  entityType String
+  chain      String
+  address    String
+  createdAt  DateTime @default(now())
+
+  @@unique([userId, entityType, chain, address])
+}
+
+model Alert {
+  id           String   @id @default(cuid())
+  userId       String?
+  user         User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  entityType   String
+  chain        String
+  address      String
+  type         String
+  severity     String
+  title        String
+  body         String
+  evidenceJson String
+  dedupeKey    String   @unique
+  read         Boolean  @default(false)
+  createdAt    DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([address, chain])
+}
+
+model Appeal {
+  id             String   @id @default(cuid())
+  userId         String?
+  user           User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  entityType     String
+  chain          String
+  address        String
+  findingId      String?
+  explanation    String
+  evidenceUrlsJson String @default("[]")
+  status         String   @default("open")
+  decisionReason String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([status])
+}
+
+model Payment {
+  id           String   @id @default(cuid())
+  userId       String?
+  user         User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  feature      String
+  amountUsdc   String
+  network      String
+  chainId      Int
+  txHash       String?
+  payerAddress String?
+  status       String
+  requestId    String   @unique
+  payloadJson  String?
+  createdAt    DateTime @default(now())
+  settledAt    DateTime?
+
+  @@index([payerAddress])
+  @@index([status])
+}
+
+model ApiKey {
+  id         String    @id @default(cuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  keyHash    String    @unique
+  label      String?
+  createdAt  DateTime  @default(now())
+  lastUsedAt DateTime?
+  revoked    Boolean   @default(false)
+}
+
+model DataSourceHealth {
+  id            String   @id @default(cuid())
+  key           String   @unique
+  name          String
+  healthy       Boolean  @default(false)
+  lastSuccessAt DateTime?
+  lastError     String?
+  lastBlock     BigInt?
+  lagBlocks     Int?
+  metaJson      String?
+  updatedAt     DateTime @updatedAt
+}
+
+model IndexerCursor {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  lastBlock BigInt   @default(0)
+  lastAt    DateTime?
+  metaJson  String?
+  updatedAt DateTime @updatedAt
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  actor      String?
+  action     String
+  entity     String?
+  beforeJson String?
+  afterJson  String?
+  createdAt  DateTime @default(now())
+
+  @@index([createdAt])
+}
+
+model KnownServiceAddress {
+  id      String @id @default(cuid())
+  chain   String
+  address String
+  label   String
+  kind    String
+
+  @@unique([chain, address])
+}
+
+model BridgeTransferRow {
+  id                       String   @id @default(cuid())
+  sourceChain              String
+  destinationChain         String
+  sourceTxHash             String   @unique
+  sender                   String
+  recipient                String
+  amountUsdc               Float
+  status                   String
+  statusDetail             String?
+  sourceExplorerUrl        String
+  recipientArcExplorerUrl  String
+  observedAt               DateTime
+  firstIndexedAt           DateTime @default(now())
+  lastCheckedAt            DateTime @updatedAt
+
+  @@index([destinationChain, observedAt])
+  @@index([recipient, observedAt])
+  @@index([status])
+}
