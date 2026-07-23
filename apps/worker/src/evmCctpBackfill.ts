@@ -3,11 +3,12 @@ import { prisma } from "@rugkiller/db";
 const MESSENGER = "0x28b5a0e9c621a5badaa536219b3a228c8168cf5d";
 const ARC_DOMAIN = "26";
 const ARC_EXPLORER = "https://megaeth-pump-ok-moon.poptyedev.com";
+const BLOCKSCOUT_PRO_API_KEY = process.env.BLOCKSCOUT_PRO_API_KEY?.trim() || null;
 const SOURCES = [
-  { key: "ethereum", explorer: "https://eth.blockscout.com", usdc: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48" },
-  { key: "optimism", explorer: "https://optimism.blockscout.com", usdc: "0x0b2c639c533813f4aa9d7837caf62653d097ff85" },
-  { key: "arbitrum", explorer: "https://arbitrum.blockscout.com", usdc: "0xaf88d065e77c8cc2239327c5edb3a432268e5831" },
-  { key: "base", explorer: "https://base.blockscout.com", usdc: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913" },
+  { key: "ethereum", chainId: 1, explorer: "https://eth.blockscout.com", usdc: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48" },
+  { key: "optimism", chainId: 10, explorer: "https://optimism.blockscout.com", usdc: "0x0b2c639c533813f4aa9d7837caf62653d097ff85" },
+  { key: "arbitrum", chainId: 42161, explorer: "https://arbitrum.blockscout.com", usdc: "0xaf88d065e77c8cc2239327c5edb3a432268e5831" },
+  { key: "base", chainId: 8453, explorer: "https://base.blockscout.com", usdc: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913" },
 ] as const;
 
 type Cursor = Record<string, string | number | null>;
@@ -20,7 +21,10 @@ async function scanOne(source: typeof SOURCES[number]) {
   const saved = await prisma.indexerCursor.findUnique({ where: { key } });
   const meta = saved?.metaJson ? JSON.parse(saved.metaJson) as { cursor?: Cursor | null; exhausted?: boolean; emptyPages?: number } : {};
   if (meta.exhausted) return { source: source.key, matched: 0, exhausted: true };
-  const url = new URL(`/api/v2/addresses/${MESSENGER}/transactions`, source.explorer);
+  const url = BLOCKSCOUT_PRO_API_KEY
+    ? new URL(`https://api.blockscout.com/${source.chainId}/api/v2/addresses/${MESSENGER}/transactions`)
+    : new URL(`/api/v2/addresses/${MESSENGER}/transactions`, source.explorer);
+  if (BLOCKSCOUT_PRO_API_KEY) url.searchParams.set("apikey", BLOCKSCOUT_PRO_API_KEY);
   url.searchParams.set("filter", "to");
   for (const [name, value] of Object.entries(meta.cursor ?? {})) url.searchParams.set(name, value == null ? "null" : String(value));
   const response = await fetch(url, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(20_000) });

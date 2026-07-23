@@ -10,7 +10,8 @@ const BASE_DOMAIN = 6;
 const BASE_BLOCKSCOUT = "https://base.blockscout.com";
 const ARC_OBSERVED_EXPLORER = "https://megaeth-pump-ok-moon.poptyedev.com";
 const IRIS_API = "https://iris-api.circle.com";
-const CACHE_MS = 20_000;
+const CACHE_MS = 5 * 60_000;
+const BLOCKSCOUT_PRO_API_KEY = process.env.BLOCKSCOUT_PRO_API_KEY?.trim() || null;
 const ARC_MESSAGE_TRANSMITTER = "0x81d40f21f12a8f0e3252bccb954d722d4c464b64";
 const ARC_MINT_SELECTOR = "0x40c10f19";
 const KNOWN_ARC_MINTERS = new Set([
@@ -26,11 +27,25 @@ const RECONCILIATION_PROBES = [{
 }];
 
 const CCTP_SOURCES = [
-  { key: "ethereum", domain: 0, explorer: "https://eth.blockscout.com", usdc: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48" },
-  { key: "optimism", domain: 2, explorer: "https://optimism.blockscout.com", usdc: "0x0b2c639c533813f4aa9d7837caf62653d097ff85" },
-  { key: "arbitrum", domain: 3, explorer: "https://arbitrum.blockscout.com", usdc: "0xaf88d065e77c8cc2239327c5edb3a432268e5831" },
-  { key: "base", domain: 6, explorer: BASE_BLOCKSCOUT, usdc: BASE_USDC },
+  { key: "ethereum", chainId: 1, domain: 0, explorer: "https://eth.blockscout.com", usdc: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48" },
+  { key: "optimism", chainId: 10, domain: 2, explorer: "https://optimism.blockscout.com", usdc: "0x0b2c639c533813f4aa9d7837caf62653d097ff85" },
+  { key: "arbitrum", chainId: 42161, domain: 3, explorer: "https://arbitrum.blockscout.com", usdc: "0xaf88d065e77c8cc2239327c5edb3a432268e5831" },
+  { key: "base", chainId: 8453, domain: 6, explorer: BASE_BLOCKSCOUT, usdc: BASE_USDC },
 ] as const;
+
+function blockscoutApiUrl(
+  chainId: number,
+  explorer: string,
+  path: string,
+  params: Record<string, string> = {}
+) {
+  const url = BLOCKSCOUT_PRO_API_KEY
+    ? new URL(`https://api.blockscout.com/${chainId}/api/v2/${path}`)
+    : new URL(`/api/v2/${path}`, explorer);
+  for (const [name, value] of Object.entries(params)) url.searchParams.set(name, value);
+  if (BLOCKSCOUT_PRO_API_KEY) url.searchParams.set("apikey", BLOCKSCOUT_PRO_API_KEY);
+  return url;
+}
 
 type DecodedParameter = { name?: string; value?: unknown };
 type BaseTransaction = {
@@ -304,13 +319,23 @@ async function circleStatus(txHash: string, sourceDomain: number): Promise<Pick<
 async function loadBridgeWatch() {
   const [sourceResults, routerResponse, arcUsdcResponse, usdcIntelligence, anomalies, tokenStats, liquidityStats] = await Promise.all([
     Promise.allSettled(CCTP_SOURCES.map(async (source) => {
-      const response = await fetch(`${source.explorer}/api/v2/addresses/${BASE_TOKEN_MESSENGER}/transactions?filter=to`, {
+      const response = await fetch(blockscoutApiUrl(
+        source.chainId,
+        source.explorer,
+        `addresses/${BASE_TOKEN_MESSENGER}/transactions`,
+        { filter: "to" }
+      ), {
         headers: { accept: "application/json" }, signal: AbortSignal.timeout(12_000),
       });
       if (!response.ok) throw new Error(`${source.key} explorer returned ${response.status}`);
       return { source, body: (await response.json()) as { items?: BaseTransaction[] } };
     })),
-    fetch(`${BASE_BLOCKSCOUT}/api/v2/addresses/${BASE_ARC_ROUTER}/transactions?filter=to`, {
+    fetch(blockscoutApiUrl(
+      8453,
+      BASE_BLOCKSCOUT,
+      `addresses/${BASE_ARC_ROUTER}/transactions`,
+      { filter: "to" }
+    ), {
       headers: { accept: "application/json" },
       signal: AbortSignal.timeout(12_000),
     }),
