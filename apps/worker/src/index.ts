@@ -92,7 +92,7 @@ async function main() {
   const observedMainnetPoll = Number(process.env.OBSERVED_MAINNET_INDEXER_POLL_MS ?? 300_000);
   const settlementPoll = Number(process.env.BRIDGE_SETTLEMENT_POLL_MS ?? 60_000);
   const solanaCctpPoll = Number(process.env.SOLANA_CCTP_POLL_MS ?? 120_000);
-  const evmCctpBackfillPoll = Number(process.env.EVM_CCTP_BACKFILL_POLL_MS ?? 60_000);
+  const evmCctpBackfillPoll = Number(process.env.EVM_CCTP_BACKFILL_POLL_MS ?? 300_000);
 
   await loop("arc-discovery", arcPoll, async () => {
     const found = await runArcDiscovery();
