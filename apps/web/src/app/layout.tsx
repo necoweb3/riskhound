@@ -25,7 +25,17 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <main className="rk-main" id="main-content">{children}</main>
           <footer className="rk-footer">
             <div className="rk-footer__inner">
-              <p>RiskHound is built on Arc. Arc™ is a trademark of Circle. Not financial advice.</p>
+              <p>
+                RiskHound is built on Arc. Arc™ is a trademark of Circle. Not financial advice.{" "}
+                <a
+                  className="rk-footer__credit"
+                  href="https://x.com/necoweb3"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  Built by @necoweb3
+                </a>
+              </p>
               <div className="rk-footer__links">
                 <Link href="/methodology">How it works</Link>
                 <Link href="/api-docs">API</Link>

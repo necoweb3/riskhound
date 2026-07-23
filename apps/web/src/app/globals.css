@@ -1343,6 +1343,17 @@ select:focus-visible {
   font-size: 0.8rem;
   color: var(--text-3);
 }
+.rk-footer__credit {
+  color: var(--text-2);
+  font-weight: 650;
+  text-decoration: underline;
+  text-decoration-color: var(--line-strong);
+  text-underline-offset: 0.18em;
+}
+.rk-footer__credit:hover {
+  color: var(--text);
+  text-decoration-color: currentColor;
+}
 .rk-footer__links {
   display: flex;
   flex-wrap: wrap;
