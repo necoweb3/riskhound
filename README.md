@@ -18,7 +18,6 @@ RiskHound uses real chain data and never generates mock risk scores. Outside-cha
 ## Quick start (no Docker)
 
 ```powershell
-cd C:\Users\pc\Desktop\kimirugkill
 pnpm install
 pnpm setup
 ```
@@ -115,7 +114,3 @@ packages/db     Prisma schema + client
 - A user-signed low-value Base USDC payment for the final x402 settlement verification
 
 Public Arcscan and Robinhood Blockscout endpoints do not currently require API keys. A dedicated RPC can be added later for higher sustained request limits.
-
-## License
-
-Private / all rights reserved unless stated otherwise.
