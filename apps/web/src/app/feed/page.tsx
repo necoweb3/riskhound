@@ -14,18 +14,20 @@ const SORTS = [
 export default async function FeedPage({
   searchParams,
 }: {
-  searchParams: Promise<{ sort?: string; q?: string }>;
+  searchParams: Promise<{ sort?: string; q?: string; page?: string }>;
 }) {
   const sp = await searchParams;
   const sort = sp.sort ?? "newest";
   const q = sp.q ?? "";
+  const page = Math.max(1, Number.parseInt(sp.page ?? "1", 10) || 1);
+  const pageSize = 40;
   let items: TokenSummary[] = [];
   let total = 0;
   let err: string | null = null;
 
   try {
     const data = await apiGet<{ items: TokenSummary[]; total: number }>(
-      `/tokens?sort=${encodeURIComponent(sort)}&q=${encodeURIComponent(q)}&limit=40`
+      `/tokens?sort=${encodeURIComponent(sort)}&q=${encodeURIComponent(q)}&limit=${pageSize}&offset=${(page - 1) * pageSize}`
     );
     items = data.items;
     total = data.total;
@@ -92,6 +94,16 @@ export default async function FeedPage({
           <TokenCard key={t.id} t={t} />
         ))}
       </div>
+
+      {!err && total > pageSize && (
+        <nav className="rk-between" aria-label="Token list pages">
+          <span className="rk-faint">Page {page} of {Math.ceil(total / pageSize)}</span>
+          <div className="rk-filters">
+            {page > 1 && <Link href={`/feed?sort=${encodeURIComponent(sort)}&q=${encodeURIComponent(q)}&page=${page - 1}`}>Previous</Link>}
+            {page * pageSize < total && <Link href={`/feed?sort=${encodeURIComponent(sort)}&q=${encodeURIComponent(q)}&page=${page + 1}`}>Next</Link>}
+          </div>
+        </nav>
+      )}
     </div>
   );
 }

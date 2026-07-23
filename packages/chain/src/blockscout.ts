@@ -271,12 +271,17 @@ export class BlockscoutClient {
   }
 
   /** Recent token contracts (discovery) */
-  async getTokens(params?: { type?: string; q?: string }) {
-    const q = qs({ type: params?.type ?? "ERC-20", q: params?.q });
+  async getTokens(params?: { type?: string; q?: string; cursor?: Record<string, unknown> | null }) {
+    const search = new URLSearchParams({ type: params?.type ?? "ERC-20" });
+    if (params?.q) search.set("q", params.q);
+    for (const [key, value] of Object.entries(params?.cursor ?? {})) {
+      search.set(key, value == null ? "null" : String(value));
+    }
+    const q = search.toString();
     try {
       return await fetchJson<{
         items: BsTokenInfo[];
-        next_page_params?: unknown;
+        next_page_params?: Record<string, unknown> | null;
       }>(`${this.v2Url}/tokens?${q}`, this.timeoutMs);
     } catch (e) {
       if (e instanceof BlockscoutError) return { items: [], next_page_params: null };

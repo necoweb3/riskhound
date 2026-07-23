@@ -99,10 +99,22 @@ export async function runArcDiscovery(): Promise<string[]> {
     }
   }
 
-  // 1) Explorer ERC-20 token list (real tokens with metadata)
+  // 1) Explorer ERC-20 inventory. Walk every Blockscout page so a fresh
+  // production database can rebuild the complete historical token list. Once
+  // caught up, refresh the first page every poll and the full inventory every
+  // 15 minutes to avoid unnecessary explorer and database load.
   try {
-    const tokens = await arc.explorer.getTokens({ type: "ERC-20" });
-    for (const t of tokens.items ?? []) {
+    const inventoryHealth = await prisma.dataSourceHealth.findUnique({
+      where: { key: "arc_testnet_tokens" },
+    });
+    const runFullInventory = !inventoryHealth?.lastSuccessAt
+      || Date.now() - inventoryHealth.lastSuccessAt.getTime() >= 15 * 60 * 1000;
+    let inventoryCursor: Record<string, unknown> | null = null;
+    let inventoryPages = 0;
+    let inventoryIndexed = 0;
+    do {
+      const tokens = await arc.explorer.getTokens({ type: "ERC-20", cursor: inventoryCursor });
+      for (const t of tokens.items ?? []) {
       const address = (t.address ?? "").toLowerCase();
       if (!address.startsWith("0x") || address.length !== 42) continue;
 
@@ -128,7 +140,7 @@ export async function runArcDiscovery(): Promise<string[]> {
             holderCount: t.holders != null ? Number(t.holders) : null,
           },
         });
-        found.push(address);
+        if (found.length < 50) found.push(address);
       } else {
         // Enrich missing metadata
         if ((!existing.name && name) || (!existing.symbol && symbol)) {
@@ -144,9 +156,30 @@ export async function runArcDiscovery(): Promise<string[]> {
             },
           });
         }
-        if (!existing.analysisUpdatedAt) found.push(address);
+        if (!existing.analysisUpdatedAt && found.length < 50) found.push(address);
       }
+      inventoryIndexed++;
     }
+      inventoryCursor = tokens.next_page_params ?? null;
+      inventoryPages++;
+    } while (runFullInventory && inventoryCursor && inventoryPages < 100);
+
+    if (runFullInventory) await prisma.dataSourceHealth.upsert({
+      where: { key: "arc_testnet_tokens" },
+      create: {
+        key: "arc_testnet_tokens",
+        name: "Arc Testnet token inventory",
+        healthy: true,
+        lastSuccessAt: new Date(),
+        metaJson: JSON.stringify({ indexed: inventoryIndexed, pages: inventoryPages }),
+      },
+      update: {
+        healthy: true,
+        lastSuccessAt: new Date(),
+        lastError: null,
+        metaJson: JSON.stringify({ indexed: inventoryIndexed, pages: inventoryPages }),
+      },
+    });
   } catch (e) {
     console.warn("[arc-discovery] tokens list", e instanceof Error ? e.message : e);
   }

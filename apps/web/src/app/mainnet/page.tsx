@@ -17,7 +17,10 @@ type MainnetTokens = {
       signals: ObservedSignal[];
     };
   }>;
-  nextCursor: string | null;
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
 };
 
 const SORTS = [
@@ -37,14 +40,15 @@ const RISK_ORDER: Record<string, number> = {
 export default async function MainnetPage({
   searchParams,
 }: {
-  searchParams: Promise<{ cursor?: string; sort?: string; q?: string }>;
+  searchParams: Promise<{ page?: string; sort?: string; q?: string; includeTests?: string }>;
 }) {
-  const { cursor, sort = "newest", q = "" } = await searchParams;
+  const { page: pageParam, sort = "newest", q = "", includeTests = "false" } = await searchParams;
+  const page = Math.max(1, Number.parseInt(pageParam ?? "1", 10) || 1);
   let data: MainnetTokens | null = null;
   let error: string | null = null;
   try {
     data = await apiGet<MainnetTokens>(
-      `/observed-mainnet/tokens?sort=${encodeURIComponent(sort)}&q=${encodeURIComponent(q)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`
+      `/observed-mainnet/tokens?sort=${encodeURIComponent(sort)}&q=${encodeURIComponent(q)}&page=${page}&limit=50&includeTests=${includeTests === "true" ? "true" : "false"}`
     );
   } catch (cause) {
     error = cause instanceof Error ? cause.message : "Could not load observed tokens.";
@@ -89,6 +93,13 @@ export default async function MainnetPage({
           </Link>
         ))}
       </nav>
+
+      <div className="rk-between">
+        <span className="rk-faint">QA and automated test contracts are hidden by default.</span>
+        <Link href={`/mainnet?sort=${encodeURIComponent(sort)}&q=${encodeURIComponent(q)}&includeTests=${includeTests === "true" ? "false" : "true"}`}>
+          {includeTests === "true" ? "Hide test contracts" : "Include test contracts"}
+        </Link>
+      </div>
 
       {error && <div className="rk-alert" role="alert">{error}</div>}
       {data && (
@@ -145,14 +156,13 @@ export default async function MainnetPage({
 
           {!visibleItems.length && <div className="rk-card rk-empty"><strong>No matches</strong>Try another filter or search.</div>}
 
-          <div className="rk-between">
-            <span className="rk-faint">50 observed tokens per page</span>
-            {data.nextCursor && (
-              <Link className="rk-btn rk-btn--primary" href={`/mainnet?cursor=${encodeURIComponent(data.nextCursor)}&sort=${encodeURIComponent(sort)}&q=${encodeURIComponent(q)}`}>
-                Next 50 tokens
-              </Link>
-            )}
-          </div>
+          <nav className="rk-between" aria-label="Observed token pages">
+            <span className="rk-faint">{data.total.toLocaleString("en-US")} tokens · Page {data.page} of {data.totalPages}</span>
+            <div className="rk-filters">
+              {data.page > 1 && <Link href={`/mainnet?page=${data.page - 1}&sort=${encodeURIComponent(sort)}&q=${encodeURIComponent(q)}&includeTests=${includeTests}`}>Previous</Link>}
+              {data.page < data.totalPages && <Link href={`/mainnet?page=${data.page + 1}&sort=${encodeURIComponent(sort)}&q=${encodeURIComponent(q)}&includeTests=${includeTests}`}>Next</Link>}
+            </div>
+          </nav>
         </>
       )}
     </div>

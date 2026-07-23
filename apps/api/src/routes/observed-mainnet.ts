@@ -126,100 +126,62 @@ function listAssessment(token: ExplorerToken) {
 export async function observedMainnetRoutes(app: FastifyInstance) {
   app.get("/observed-mainnet/tokens", async (request, reply) => {
     const query = z.object({
-      cursor: z.string().optional(),
-      sort: z.enum(["newest", "high_risk", "critical", "holders"]).optional(),
+      page: z.coerce.number().int().min(1).optional().default(1),
+      limit: z.coerce.number().int().min(1).max(100).optional().default(50),
+      sort: z.enum(["newest", "high_risk", "critical", "holders"]).optional().default("newest"),
       q: z.string().max(120).optional(),
+      includeTests: z.enum(["true", "false"]).optional().default("false").transform((value) => value === "true"),
     }).parse(request.query);
-    if (query.sort || query.q) {
-      const needle = query.q?.trim();
-      const riskWhere = query.sort === "critical"
-        ? { overallRisk: "critical_risk" }
-        : query.sort === "high_risk"
-          ? { overallRisk: { in: ["critical_risk", "high_risk"] } }
-          : {};
-      const cached = await prisma.token.findMany({
-        where: {
-          chain: "arc_observed_5042",
-          ...riskWhere,
-          ...(needle ? { OR: [
-            { address: { contains: needle.toLowerCase() } },
-            { name: { contains: needle } },
-            { symbol: { contains: needle } },
-          ] } : {}),
-        },
-        orderBy: query.sort === "holders" ? { holderCount: "desc" } : { createdAt: "desc" },
-        take: 50,
-      });
-      return {
-        network: { name: "Observed Arc network", chainId: 5042, status: "unannounced" },
-        items: cached.map((token) => ({
-          address: token.address,
-          name: token.name,
-          symbol: token.symbol,
-          decimals: token.decimals,
-          totalSupply: token.totalSupply,
-          holderCount: token.holderCount,
-          standard: token.standard,
-          explorerUrl: `${EXPLORER}/token/${token.address}`,
-          riskAssessment: {
-            level: token.overallRisk ?? "caution",
-            confidence: token.confidence ?? "low",
-            signals: [{ severity: "medium", name: "Open the evidence breakdown", detail: "Token detail contains the currently stored assessment." }],
-          },
-        })),
-        nextCursor: null,
-        explorer: EXPLORER,
-        cached: true,
-      };
-    }
-    const cursor = decodeCursor(query.cursor);
-    if (query.cursor && !cursor) return reply.code(400).send({ error: "invalid_cursor" });
-    const response = await fetch(`${API}/tokens?${queryString(cursor)}`, {
-      headers: { accept: "application/json" }, signal: AbortSignal.timeout(15_000),
-    });
-    if (!response.ok) {
-      const cached = await prisma.token.findMany({
-        where: { chain: "arc_observed_5042" }, orderBy: { updatedAt: "desc" }, take: 50,
-      });
-      if (!cached.length) return reply.code(502).send({ error: "mainnet_explorer_unavailable" });
-      return {
-        network: { name: "Observed Arc network", chainId: 5042, status: "unannounced" },
-        items: cached.map((token) => ({
-          address: token.address, name: token.name, symbol: token.symbol, decimals: token.decimals,
-          totalSupply: token.totalSupply, holderCount: token.holderCount, standard: token.standard,
-          explorerUrl: `${EXPLORER}/token/${token.address}`,
-          riskAssessment: { level: token.overallRisk ?? "caution", confidence: token.confidence ?? "low", signals: [{ severity: "medium", name: "Cached observed evidence", detail: "Open the token for the latest available breakdown." }] },
-        })),
-        nextCursor: null,
-        explorer: EXPLORER,
-        cached: true,
-      };
-    }
-    const body = (await response.json()) as {
-      items?: ExplorerToken[];
-      next_page_params?: Record<string, unknown> | null;
+    const needle = query.q?.trim();
+    const where = {
+      chain: "arc_observed_5042",
+      ...(query.sort === "critical" ? { overallRisk: "critical_risk" } : {}),
+      ...(query.sort === "high_risk" ? { overallRisk: { in: ["critical_risk", "high_risk"] } } : {}),
+      ...(!query.includeTests ? {
+        AND: [
+          { NOT: { name: { startsWith: "qa_" } } },
+          { NOT: { symbol: { startsWith: "qa_" } } },
+        ],
+      } : {}),
+      ...(needle ? { OR: [
+        { address: { contains: needle.toLowerCase() } },
+        { name: { contains: needle } },
+        { symbol: { contains: needle } },
+      ] } : {}),
     };
-    const tokenViews = (body.items ?? []).map(tokenView);
-    const cachedAssessments = await prisma.token.findMany({
-      where: { chain: "arc_observed_5042", address: { in: tokenViews.map((token) => token.address) } },
-      select: { address: true, overallRisk: true, confidence: true },
-    });
-    const assessmentByAddress = new Map(cachedAssessments.map((token) => [token.address, token]));
+    const orderBy = query.sort === "holders"
+      ? [{ holderCount: "desc" as const }, { createdAt: "desc" as const }]
+      : query.sort === "high_risk" || query.sort === "critical"
+        ? [{ overallRisk: "desc" as const }, { holderCount: "desc" as const }]
+        : [{ createdAt: "desc" as const }, { address: "asc" as const }];
+    const [cached, total] = await Promise.all([
+      prisma.token.findMany({ where, orderBy, take: query.limit, skip: (query.page - 1) * query.limit }),
+      prisma.token.count({ where }),
+    ]);
     return {
       network: { name: "Observed Arc network", chainId: 5042, status: "unannounced" },
-      items: (body.items ?? []).map((token) => {
-        const view = tokenView(token);
-        const cached = assessmentByAddress.get(view.address);
-        const fallback = listAssessment(token);
-        return {
-          ...view,
-          riskAssessment: cached?.overallRisk
-            ? { ...fallback, level: cached.overallRisk, confidence: cached.confidence ?? fallback.confidence }
-            : fallback,
-        };
-      }),
-      nextCursor: body.next_page_params ? encodeCursor(body.next_page_params) : null,
+      items: cached.map((token) => ({
+        address: token.address,
+        name: token.name,
+        symbol: token.symbol,
+        decimals: token.decimals,
+        totalSupply: token.totalSupply,
+        holderCount: token.holderCount,
+        standard: token.standard,
+        explorerUrl: `${EXPLORER}/token/${token.address}`,
+        riskAssessment: {
+          level: token.overallRisk ?? "caution",
+          confidence: token.confidence ?? "low",
+          signals: [{ severity: "medium", name: "Open the evidence breakdown", detail: "Token detail contains the currently stored assessment." }],
+        },
+      })),
+      total,
+      page: query.page,
+      pageSize: query.limit,
+      totalPages: Math.max(1, Math.ceil(total / query.limit)),
+      includeTests: query.includeTests,
       explorer: EXPLORER,
+      cached: true,
     };
   });
 
