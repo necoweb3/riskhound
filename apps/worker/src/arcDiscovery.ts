@@ -114,52 +114,48 @@ export async function runArcDiscovery(): Promise<string[]> {
     let inventoryIndexed = 0;
     do {
       const tokens = await arc.explorer.getTokens({ type: "ERC-20", cursor: inventoryCursor });
-      for (const t of tokens.items ?? []) {
-      const address = (t.address ?? t.address_hash ?? "").toLowerCase();
-      if (!address.startsWith("0x") || address.length !== 42) continue;
-
-      const name = t.name?.trim() || null;
-      const symbol = t.symbol?.trim() || null;
-      // Skip empty metadata placeholders
-      if (!name && !symbol && !t.total_supply) continue;
-
-      const existing = await prisma.token.findUnique({
-        where: { chain_address: { chain: "arc_testnet", address } },
+      const candidates = (tokens.items ?? []).flatMap((t) => {
+        const address = (t.address ?? t.address_hash ?? "").toLowerCase();
+        const name = t.name?.trim() || null;
+        const symbol = t.symbol?.trim() || null;
+        if (!address.startsWith("0x") || address.length !== 42 || (!name && !symbol && !t.total_supply)) return [];
+        return [{
+          address,
+          name,
+          symbol,
+          decimals: t.decimals != null ? Number(t.decimals) : null,
+          totalSupply: t.total_supply ?? null,
+          holderCount: (t.holders ?? t.holders_count) != null ? Number(t.holders ?? t.holders_count) : null,
+        }];
       });
-
-      if (!existing) {
-        await prisma.token.create({
-          data: {
-            chain: "arc_testnet",
-            address,
-            name,
-            symbol,
-            decimals: t.decimals != null ? Number(t.decimals) : null,
-            totalSupply: t.total_supply ?? null,
-            standard: "ERC-20",
-            holderCount: (t.holders ?? t.holders_count) != null ? Number(t.holders ?? t.holders_count) : null,
-          },
+      const existingRows = candidates.length ? await prisma.token.findMany({
+        where: { chain: "arc_testnet", address: { in: candidates.map((item) => item.address) } },
+      }) : [];
+      const existingByAddress = new Map(existingRows.map((row) => [row.address, row]));
+      const newRows = candidates.filter((item) => !existingByAddress.has(item.address));
+      if (newRows.length) {
+        await prisma.token.createMany({
+          data: newRows.map((item) => ({ ...item, chain: "arc_testnet", standard: "ERC-20" })),
         });
-        if (found.length < 50) found.push(address);
-      } else {
-        // Enrich missing metadata
-        if ((!existing.name && name) || (!existing.symbol && symbol)) {
+      }
+      for (const item of candidates) {
+        const existing = existingByAddress.get(item.address);
+        if (found.length < 50 && (!existing || !existing.analysisUpdatedAt)) found.push(item.address);
+        if (existing && ((!existing.name && item.name) || (!existing.symbol && item.symbol))) {
           await prisma.token.update({
             where: { id: existing.id },
             data: {
-              name: existing.name ?? name,
-              symbol: existing.symbol ?? symbol,
-              decimals: existing.decimals ?? (t.decimals != null ? Number(t.decimals) : null),
-              totalSupply: existing.totalSupply ?? t.total_supply ?? null,
+              name: existing.name ?? item.name,
+              symbol: existing.symbol ?? item.symbol,
+              decimals: existing.decimals ?? item.decimals,
+              totalSupply: existing.totalSupply ?? item.totalSupply,
               standard: "ERC-20",
-              holderCount: (t.holders ?? t.holders_count) != null ? Number(t.holders ?? t.holders_count) : existing.holderCount,
+              holderCount: item.holderCount ?? existing.holderCount,
             },
           });
         }
-        if (!existing.analysisUpdatedAt && found.length < 50) found.push(address);
       }
-      inventoryIndexed++;
-    }
+      inventoryIndexed += candidates.length;
       inventoryCursor = tokens.next_page_params ?? null;
       inventoryPages++;
     } while (runFullInventory && inventoryCursor && inventoryPages < 100);
