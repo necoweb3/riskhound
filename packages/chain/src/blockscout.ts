@@ -52,12 +52,14 @@ function qs(params: Record<string, string | number | undefined | null>) {
 }
 
 export interface BsTokenInfo {
-  address: string;
+  address?: string;
+  address_hash?: string;
   name?: string;
   symbol?: string;
   decimals?: string | number;
   total_supply?: string;
   holders?: string | number;
+  holders_count?: string | number;
   type?: string;
   exchange_rate?: string | null;
   circulating_market_cap?: string | null;

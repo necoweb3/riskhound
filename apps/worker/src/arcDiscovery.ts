@@ -115,7 +115,7 @@ export async function runArcDiscovery(): Promise<string[]> {
     do {
       const tokens = await arc.explorer.getTokens({ type: "ERC-20", cursor: inventoryCursor });
       for (const t of tokens.items ?? []) {
-      const address = (t.address ?? "").toLowerCase();
+      const address = (t.address ?? t.address_hash ?? "").toLowerCase();
       if (!address.startsWith("0x") || address.length !== 42) continue;
 
       const name = t.name?.trim() || null;
@@ -137,7 +137,7 @@ export async function runArcDiscovery(): Promise<string[]> {
             decimals: t.decimals != null ? Number(t.decimals) : null,
             totalSupply: t.total_supply ?? null,
             standard: "ERC-20",
-            holderCount: t.holders != null ? Number(t.holders) : null,
+            holderCount: (t.holders ?? t.holders_count) != null ? Number(t.holders ?? t.holders_count) : null,
           },
         });
         if (found.length < 50) found.push(address);
@@ -152,7 +152,7 @@ export async function runArcDiscovery(): Promise<string[]> {
               decimals: existing.decimals ?? (t.decimals != null ? Number(t.decimals) : null),
               totalSupply: existing.totalSupply ?? t.total_supply ?? null,
               standard: "ERC-20",
-              holderCount: t.holders != null ? Number(t.holders) : existing.holderCount,
+              holderCount: (t.holders ?? t.holders_count) != null ? Number(t.holders ?? t.holders_count) : existing.holderCount,
             },
           });
         }
