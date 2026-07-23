@@ -17,7 +17,7 @@ export const viewport: Viewport = { themeColor: "#f6f6f7" };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
       <body>
         <a className="rk-skip" href="#main-content">Skip to content</a>
         <div className="rk-shell">
