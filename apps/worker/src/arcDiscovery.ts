@@ -107,7 +107,13 @@ export async function runArcDiscovery(): Promise<string[]> {
     const inventoryHealth = await prisma.dataSourceHealth.findUnique({
       where: { key: "arc_testnet_tokens" },
     });
-    const runFullInventory = !inventoryHealth?.lastSuccessAt
+    let previousIndexed = 0;
+    try {
+      previousIndexed = Number(JSON.parse(inventoryHealth?.metaJson ?? "{}").indexed ?? 0);
+    } catch {
+      previousIndexed = 0;
+    }
+    const runFullInventory = previousIndexed <= 0 || !inventoryHealth?.lastSuccessAt
       || Date.now() - inventoryHealth.lastSuccessAt.getTime() >= 15 * 60 * 1000;
     let inventoryCursor: Record<string, unknown> | null = null;
     let inventoryPages = 0;
@@ -177,6 +183,19 @@ export async function runArcDiscovery(): Promise<string[]> {
       },
     });
   } catch (e) {
+    await prisma.dataSourceHealth.upsert({
+      where: { key: "arc_testnet_tokens" },
+      create: {
+        key: "arc_testnet_tokens",
+        name: "Arc Testnet token inventory",
+        healthy: false,
+        lastError: e instanceof Error ? e.message : String(e),
+      },
+      update: {
+        healthy: false,
+        lastError: e instanceof Error ? e.message : String(e),
+      },
+    });
     console.warn("[arc-discovery] tokens list", e instanceof Error ? e.message : e);
   }
 
