@@ -69,6 +69,7 @@ type TokenPayload = {
   } | null;
   stale?: boolean;
   analysisUpdatedAt?: string;
+  analysisPending?: boolean;
   explorerAddress?: string;
   deployerProfile?: {
     historyLabel?: string;
@@ -87,6 +88,7 @@ async function loadToken(addr: string): Promise<{ data?: TokenPayload; err?: str
       simulation: TokenPayload["simulation"];
       stale?: boolean;
       analysisUpdatedAt?: string;
+      analysisPending?: boolean;
     }>(`/tokens/${addr}`);
 
     // Refresh stale analyses in background-style (await for correctness)
@@ -132,6 +134,7 @@ async function loadToken(addr: string): Promise<{ data?: TokenPayload; err?: str
         simulation: cached.simulation,
         stale: cached.stale,
         analysisUpdatedAt: cached.analysisUpdatedAt,
+        analysisPending: cached.analysisPending,
         explorerAddress: `https://testnet.arcscan.app/address/${addr}`,
       },
     };
@@ -281,6 +284,7 @@ export default async function TokenPage({
             {!summary.isVerified && <span className="rk-chip">Code not verified</span>}
             {summary.isProxy && <span className="rk-chip">Upgradeable</span>}
             {data.stale && <span className="rk-chip">Refreshing…</span>}
+            {data.analysisPending && <span className="rk-chip">Analysis queued</span>}
           </div>
           {updated && (
             <p className="rk-faint" style={{ margin: "0.65rem 0 0", fontSize: "0.8rem" }}>
@@ -307,7 +311,7 @@ export default async function TokenPage({
         <div className="rk-stat">
           <span className="rk-stat__label">Overall</span>
           <div className="rk-stat__value">
-            {report ? <RiskBadge risk={report.overall} /> : "Not checked"}
+            {report ? <RiskBadge risk={report.overall} /> : data.analysisPending ? "Queued" : "Not checked"}
           </div>
         </div>
         <div className="rk-stat">
@@ -412,7 +416,11 @@ export default async function TokenPage({
                 </article>
               );
             })}
-            {!topFindings.length && <p className="rk-faint">No specific flags stored yet.</p>}
+            {!topFindings.length && (
+              <p className="rk-faint">
+                {data.analysisPending ? "Risk analysis is queued. Refresh shortly to see the evidence." : "No specific flags stored yet."}
+              </p>
+            )}
           </div>
         </section>
 

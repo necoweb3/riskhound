@@ -123,12 +123,32 @@ export async function tokenRoutes(app: FastifyInstance) {
         },
       });
 
-      if (!row || !row.analyses[0]) {
+      if (!row) {
         return reply.code(404).send({
-          error: "not_analyzed",
-          message: "Token not analyzed yet",
+          error: "token_not_found",
+          message: "Token not found",
           address: norm,
         });
+      }
+
+      if (!row.analyses[0]) {
+        return {
+          summary: tokenRowToSummary(row),
+          report: null,
+          findings: [],
+          holders: row.holders.map((h) => ({
+            address: h.address,
+            balance: h.balance,
+            pct: h.pct,
+            isContract: h.isContract,
+            labels: jparse(h.labelsJson, [] as string[]),
+          })),
+          simulation: null,
+          pools: row.pools,
+          stale: false,
+          analysisPending: true,
+          analysisUpdatedAt: null,
+        };
       }
 
       const report = jparse(row.analyses[0].reportJson, null);

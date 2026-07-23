@@ -102,7 +102,13 @@ async function main() {
           .add(
             "analyze",
             { address: addr, chain: "arc_testnet" },
-            { jobId: `disc-${addr}`, removeOnComplete: true }
+            {
+              jobId: `recent-${addr}-${Math.floor(Date.now() / 3_600_000)}`,
+              attempts: 3,
+              backoff: { type: "exponential", delay: 10_000 },
+              removeOnComplete: true,
+              removeOnFail: { age: 3_600, count: 1_000 },
+            }
           )
           .catch(() => undefined);
       } else {
@@ -113,6 +119,58 @@ async function main() {
         }
       }
     }
+  });
+
+  await loop("analysis-backfill", 60_000, async () => {
+    const batchSize = Math.max(1, Math.min(50, Number(process.env.ANALYSIS_BACKFILL_BATCH ?? 20)));
+    const [pending, analyzed, batch] = await Promise.all([
+      prisma.token.count({ where: { chain: "arc_testnet", analysisUpdatedAt: null } }),
+      prisma.token.count({ where: { chain: "arc_testnet", analysisUpdatedAt: { not: null } } }),
+      prisma.token.findMany({
+        where: {
+          chain: "arc_testnet",
+          analysisUpdatedAt: null,
+          OR: [{ name: { not: null } }, { symbol: { not: null } }],
+        },
+        orderBy: [{ holderCount: "desc" }, { createdAt: "desc" }],
+        take: batchSize,
+        select: { address: true },
+      }),
+    ]);
+    const hourBucket = Math.floor(Date.now() / 3_600_000);
+    if (analysisQueue) {
+      for (const token of batch) {
+        await analysisQueue.add(
+          "analyze-backfill",
+          { address: token.address, chain: "arc_testnet" },
+          {
+            jobId: `backfill-${token.address}-${hourBucket}`,
+            attempts: 3,
+            backoff: { type: "exponential", delay: 15_000 },
+            removeOnComplete: true,
+            removeOnFail: { age: 3_600, count: 1_000 },
+          }
+        ).catch(() => undefined);
+      }
+    } else if (batch[0]) {
+      await loadRhAndAnalyze(batch[0].address);
+    }
+    await prisma.dataSourceHealth.upsert({
+      where: { key: "analysis_backlog" },
+      create: {
+        key: "analysis_backlog",
+        name: "Arc token analysis backlog",
+        healthy: true,
+        lastSuccessAt: new Date(),
+        metaJson: JSON.stringify({ pending, analyzed, scheduled: batch.length }),
+      },
+      update: {
+        healthy: true,
+        lastSuccessAt: new Date(),
+        lastError: null,
+        metaJson: JSON.stringify({ pending, analyzed, scheduled: batch.length }),
+      },
+    });
   });
 
   await loop("rh-indexer", rhPoll, async () => {

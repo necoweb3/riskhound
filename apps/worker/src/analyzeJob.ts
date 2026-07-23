@@ -207,5 +207,24 @@ export async function loadRhAndAnalyze(address: string) {
     }
   }
 
+  if (d.deployer) {
+    await prisma.wallet.upsert({
+      where: { chain_address: { chain: d.chain, address: d.deployer } },
+      create: {
+        chain: d.chain,
+        address: d.deployer,
+        firstSeenAt: d.deployerProfile?.firstSeenAt ? new Date(d.deployerProfile.firstSeenAt) : null,
+        lastSeenAt: d.deployerProfile?.lastSeenAt ? new Date(d.deployerProfile.lastSeenAt) : null,
+        firstFunder: d.deployerProfile?.firstFunder,
+        historyLabel: d.deployerProfile?.historyLabel,
+        labelsJson: jstr(["deployer"]),
+      },
+      update: {
+        firstFunder: d.deployerProfile?.firstFunder,
+        historyLabel: d.deployerProfile?.historyLabel,
+      },
+    });
+  }
+
   return { tokenId: token.id, overall: result.report.overall, errors: result.errors };
 }
