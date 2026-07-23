@@ -78,11 +78,18 @@ export async function tokenRoutes(app: FastifyInstance) {
       }
 
       // Default: recently analyzed first (more useful than raw deploys)
-      let orderBy: object | object[] = [{ analysisUpdatedAt: "desc" }, { createdAt: "desc" }];
+      let orderBy: object | object[] = [
+        { analysisUpdatedAt: { sort: "desc", nulls: "last" } },
+        { createdAt: "desc" },
+      ];
       if (q.sort === "liquidity") orderBy = [{ liquidityUsd: "desc" }, { createdAt: "desc" }];
       if (q.sort === "holders") orderBy = [{ holderCount: "desc" }, { createdAt: "desc" }];
       if (q.sort === "newest") {
-        orderBy = [{ analysisUpdatedAt: "desc" }, { deployTimestamp: "desc" }, { createdAt: "desc" }];
+        orderBy = [
+          { analysisUpdatedAt: { sort: "desc", nulls: "last" } },
+          { deployTimestamp: { sort: "desc", nulls: "last" } },
+          { createdAt: "desc" },
+        ];
       }
 
       const [items, total] = await Promise.all([
