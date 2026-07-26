@@ -4,12 +4,16 @@ import Link from "next/link";
 import Image from "next/image";
 import { usePathname } from "next/navigation";
 import { useState } from "react";
+import { ThemeToggle } from "./ThemeToggle";
+import { CommandPalette } from "./CommandPalette";
 
 const links = [
-  { href: "/feed", label: "Discover" },
-  { href: "/scan", label: "Check" },
-  { href: "/wallets", label: "Creators" },
-  { href: "/bridge-watch", label: "Bridge watch" },
+  { href: "/feed", label: "Discover", also: ["/mainnet", "/token"] },
+  { href: "/scan", label: "Check", also: [] as string[] },
+  { href: "/wallets", label: "Creators", also: ["/wallet"] },
+  { href: "/watchlist", label: "Watchlist", also: [] as string[] },
+  { href: "/bridge-watch", label: "Bridge", also: [] as string[] },
+  { href: "/events", label: "Events", also: [] as string[] },
 ];
 
 export function Nav() {
@@ -21,19 +25,23 @@ export function Nav() {
       <div className="rk-nav__inner">
         <Link href="/" className="rk-logo" onClick={() => setOpen(false)}>
           <span className="rk-logo__mark">
-            <Image src="/riskhound-logo.png" alt="" width={68} height={68} priority />
+            <Image src="/riskhound-logo.png" alt="" width={27} height={27} priority />
           </span>
-          RiskHound
+          <span>RiskHound</span>
         </Link>
 
         <nav className="rk-nav__links" aria-label="Main navigation">
           {links.map((link) => {
-            const active = pathname === link.href || pathname.startsWith(`${link.href}/`);
+            const active =
+              pathname === link.href ||
+              pathname.startsWith(`${link.href}/`) ||
+              link.also.some((p) => pathname === p || pathname.startsWith(`${p}/`));
             return (
               <Link
                 key={link.href}
                 href={link.href}
                 className={active ? "is-active" : undefined}
+                aria-current={active ? "page" : undefined}
                 onClick={() => setOpen(false)}
               >
                 {link.label}
@@ -43,6 +51,12 @@ export function Nav() {
         </nav>
 
         <div className="rk-nav__right">
+          <CommandPalette />
+          <Link href="/api-docs" className="rk-nav__api">
+            API
+          </Link>
+          <span className="rk-nav__divider" aria-hidden="true" />
+          <ThemeToggle />
           <button
             type="button"
             className="rk-nav__burger"
