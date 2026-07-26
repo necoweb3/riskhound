@@ -7,7 +7,7 @@ import {
   type BlockscoutClient,
   bytecodeHash,
   detectProxyHints,
-  getCode,
+  probeCode,
   readErc20Meta,
   scanSelectors,
   type PublicClient,
@@ -164,6 +164,7 @@ export async function analyzeContract(input: ContractAnalysisInput): Promise<Con
   let proxyReasons: string[] = [];
   let codeHash: string | null = null;
   let hasCode = false;
+  let codeRead = false;
   let templateHint: string | null = null;
   let deployer: string | null = null;
   let deployTxHash: string | null = null;
@@ -244,8 +245,10 @@ export async function analyzeContract(input: ContractAnalysisInput): Promise<Con
       errors.push(`rpc meta: ${e instanceof Error ? e.message : String(e)}`);
     }
 
-    try {
-      code = await getCode(input.rpc, input.address);
+    const probe = await probeCode(input.rpc, input.address);
+    if (probe.ok) {
+      codeRead = true;
+      code = probe.code;
       dataSourcesUsed.push(`${input.chain}:rpc_code`);
       hasCode = Boolean(code);
       if (code) {
@@ -257,14 +260,16 @@ export async function analyzeContract(input: ContractAnalysisInput): Promise<Con
           proxyReasons = [...new Set([...proxyReasons, ...proxy.reasons])];
         }
       }
-    } catch (e) {
-      errors.push(`rpc code: ${e instanceof Error ? e.message : String(e)}`);
+    } else {
+      errors.push(`rpc code: ${probe.error}`);
     }
   } else {
     errors.push("RPC unavailable for this chain. Bytecode analysis is limited.");
   }
 
-  if (!hasCode && input.rpc) {
+  // Only a successful read can support the claim that there is no code here.
+  // A failed read is a gap, and a gap is never a critical verdict.
+  if (input.rpc && codeRead && !hasCode) {
     findings.push({
       id: `no-code-${input.address}`,
       category: "data_gaps",
@@ -273,6 +278,19 @@ export async function analyzeContract(input: ContractAnalysisInput): Promise<Con
       status: "observed",
       summary: "Address has no deployed bytecode on the analysis network.",
       whyItMatters: "Not a token contract, or wrong network/address.",
+      evidence: [ev(input.chain, "contract", input.address, "address", `${input.explorerUrl}/address/${input.address}`)],
+      source: "automatic",
+    });
+  } else if (input.rpc && !codeRead) {
+    findings.push({
+      id: `code-unreadable-${input.address}`,
+      category: "data_gaps",
+      name: "Bytecode could not be read",
+      severity: "medium",
+      status: "observed",
+      summary: "The node did not answer the bytecode request, so contract analysis is incomplete.",
+      whyItMatters:
+        "An unreadable contract is unknown, not empty and not safe. Re-run once the node responds.",
       evidence: [ev(input.chain, "contract", input.address, "address", `${input.explorerUrl}/address/${input.address}`)],
       source: "automatic",
     });

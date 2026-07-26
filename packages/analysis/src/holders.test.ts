@@ -1,0 +1,81 @@
+import { describe, expect, it } from "vitest";
+import { analyzeHolders } from "./holders.js";
+import type { BlockscoutClient } from "@rugkiller/chain";
+
+const BURN = "0x000000000000000000000000000000000000dead";
+const ZERO = "0x0000000000000000000000000000000000000000";
+const SUPPLY = "1000";
+
+function explorerWith(items: { address: string; value: string }[]) {
+  return {
+    getTokenHolders: async () => ({ items }),
+    getTokenTransfers: async () => ({ items: [] }),
+  } as unknown as BlockscoutClient;
+}
+
+describe("analyzeHolders", () => {
+  it("does not count burned supply as concentration", async () => {
+    // 97% burned, the rest spread across ordinary wallets. This is the
+    // opposite of a concentrated token and must not be flagged as one.
+    const res = await analyzeHolders({
+      chain: "arc_testnet",
+      token: "0xtoken",
+      explorer: explorerWith([
+        { address: BURN, value: "900" },
+        { address: ZERO, value: "70" },
+        { address: "0x1111111111111111111111111111111111111111", value: "10" },
+        { address: "0x2222222222222222222222222222222222222222", value: "10" },
+        { address: "0x3333333333333333333333333333333333333333", value: "10" },
+      ]),
+      totalSupply: SUPPLY,
+    });
+
+    expect(res.findings.some((f) => f.name === "High top-10 concentration")).toBe(false);
+    expect(res.top10Pct).toBeLessThan(80);
+  });
+
+  it("still flags real concentration held by ordinary wallets", async () => {
+    const res = await analyzeHolders({
+      chain: "arc_testnet",
+      token: "0xtoken",
+      explorer: explorerWith([
+        { address: "0x1111111111111111111111111111111111111111", value: "990" },
+        { address: "0x2222222222222222222222222222222222222222", value: "10" },
+      ]),
+      totalSupply: SUPPLY,
+    });
+
+    const f = res.findings.find((x) => x.name === "High top-10 concentration");
+    expect(f?.severity).toBe("critical");
+  });
+
+  it("reports incomplete rather than clean when total supply is unknown", async () => {
+    const res = await analyzeHolders({
+      chain: "arc_testnet",
+      token: "0xtoken",
+      explorer: explorerWith([
+        { address: "0x1111111111111111111111111111111111111111", value: "990" },
+      ]),
+      totalSupply: null,
+    });
+
+    expect(res.dataComplete).toBe(false);
+    expect(res.findings.some((f) => f.name === "Holder data incomplete")).toBe(true);
+  });
+
+  it("leaves the deployer share unknown when the deployer is not in the page", async () => {
+    const res = await analyzeHolders({
+      chain: "arc_testnet",
+      token: "0xtoken",
+      explorer: explorerWith([
+        { address: "0x1111111111111111111111111111111111111111", value: "1000" },
+      ]),
+      deployer: "0x9999999999999999999999999999999999999999",
+      totalSupply: SUPPLY,
+    });
+
+    // Zero would read as "the deployer holds nothing", which is a claim we
+    // cannot make from a single page of holders.
+    expect(res.deployerPct).toBeNull();
+  });
+});

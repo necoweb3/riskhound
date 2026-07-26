@@ -189,6 +189,10 @@ export async function observedMainnetRoutes(app: FastifyInstance) {
     const { address } = request.params as { address: string };
     const normalized = normalizeAddress(address);
     if (!normalized) return reply.code(400).send({ error: "invalid_address" });
+    // normalizeAddress returns EIP-55 checksummed. Every other writer stores
+    // lowercase, so writing the checksummed form created a second Token row
+    // for the same contract and the assessment never reached the listing.
+    const stored = normalized.toLowerCase();
     const [tokenResponse, holdersResponse, addressResponse] = await Promise.all([
       fetch(`${API}/tokens/${normalized}`, { signal: AbortSignal.timeout(15_000) }),
       fetch(`${API}/tokens/${normalized}/holders`, { signal: AbortSignal.timeout(15_000) }),
@@ -239,10 +243,10 @@ export async function observedMainnetRoutes(app: FastifyInstance) {
     });
     const view = tokenView(token);
     await prisma.token.upsert({
-      where: { chain_address: { chain: "arc_observed_5042", address: normalized } },
+      where: { chain_address: { chain: "arc_observed_5042", address: stored } },
       create: {
         chain: "arc_observed_5042",
-        address: normalized,
+        address: stored,
         name: view.name,
         symbol: view.symbol,
         decimals: view.decimals,

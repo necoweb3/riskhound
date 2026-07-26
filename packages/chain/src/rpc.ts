@@ -135,14 +135,28 @@ export async function readErc20Meta(
   };
 }
 
-export async function getCode(client: PublicClient, address: Address): Promise<Hex | null> {
+/**
+ * "The node did not answer" and "this address has no code" are different
+ * facts, and treating them alike lets an RPC outage be reported as a verdict
+ * about the token. Callers that make a risk claim must use probeCode.
+ */
+export type CodeProbe =
+  | { ok: true; code: Hex | null }
+  | { ok: false; error: string };
+
+export async function probeCode(client: PublicClient, address: Address): Promise<CodeProbe> {
   try {
     const code = await client.getCode({ address });
-    if (!code || code === "0x") return null;
-    return code;
-  } catch {
-    return null;
+    return { ok: true, code: !code || code === "0x" ? null : code };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
+}
+
+/** Convenience wrapper for callers that only need the bytecode when present. */
+export async function getCode(client: PublicClient, address: Address): Promise<Hex | null> {
+  const probe = await probeCode(client, address);
+  return probe.ok ? probe.code : null;
 }
 
 export function bytecodeHash(code: Hex): string {

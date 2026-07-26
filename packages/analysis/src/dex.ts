@@ -252,7 +252,10 @@ export async function analyzeApexiSwap(opts: {
     ],
     simulation: {
       canBuy: Boolean(buyQuote),
-      canSell: execution?.ok ? true : null,
+      // tested && !ok means the round trip actually ran and the sell reverted.
+      // Collapsing that to null made the honeypot rule in scoring.ts
+      // unreachable, so a proven sell trap was never reported as one.
+      canSell: execution?.ok ? true : execution?.tested ? false : null,
       buyTaxBps: null,
       sellTaxBps: execution?.ok ? execution.lossBps : null,
       steps: [

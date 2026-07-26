@@ -62,7 +62,9 @@ export async function analyzeHolders(opts: {
         labels,
       });
     }
-    dataComplete = holders.length > 0;
+    // Without total supply every share is null, so the category would report
+    // zero findings and still call itself complete. That reads as "clean".
+    dataComplete = holders.length > 0 && supply != null && supply > 0n;
   } catch (e) {
     errors.push(e instanceof Error ? e.message : String(e));
   }
@@ -75,7 +77,15 @@ export async function analyzeHolders(opts: {
     }
   });
 
-  const top10 = ranked.slice(0, 10);
+  // Burn addresses, the zero address, routers and CEX wallets are not owners
+  // of circulating supply. Counting them made a fully burned token read as
+  // 100% concentrated, which is the opposite of the truth.
+  const circulating = ranked.filter((h) => !h.labels.includes("known_service"));
+  const excludedPct = ranked
+    .filter((h) => h.labels.includes("known_service"))
+    .reduce((a, h) => a + (h.pct ?? 0), 0);
+
+  const top10 = circulating.slice(0, 10);
   const top10Pct =
     top10.length && top10.every((h) => h.pct != null)
       ? top10.reduce((a, h) => a + (h.pct ?? 0), 0)
@@ -84,7 +94,8 @@ export async function analyzeHolders(opts: {
   let deployerPct: number | null = null;
   if (opts.deployer) {
     const d = holders.find((h) => h.address === opts.deployer!.toLowerCase());
-    deployerPct = d?.pct ?? 0;
+    // A deployer missing from the returned page is unknown, not a zero holder.
+    deployerPct = d ? d.pct : null;
   }
 
   if (top10Pct != null && top10Pct >= 80) {
@@ -94,7 +105,10 @@ export async function analyzeHolders(opts: {
       name: "High top-10 concentration",
       severity: top10Pct >= 95 ? "critical" : "high",
       status: "observed",
-      summary: `Top 10 holders control ~${top10Pct.toFixed(1)}% of tracked supply.`,
+      summary:
+        excludedPct > 0.01
+          ? `Top 10 non-service holders control ~${top10Pct.toFixed(1)}% of tracked supply. A further ~${excludedPct.toFixed(1)}% sits in burn or known service addresses and is excluded.`
+          : `Top 10 holders control ~${top10Pct.toFixed(1)}% of tracked supply.`,
       whyItMatters: "Concentrated supply enables sudden dumps.",
       evidence: top10.slice(0, 5).map(
         (h): EvidenceRef => ({

@@ -205,7 +205,11 @@ export async function tokenRoutes(app: FastifyInstance) {
     }
   });
 
-  app.post("/tokens/:address/analyze", async (req, reply) => {
+  // A full analysis fans out to dozens of explorer and RPC calls and writes
+  // to the database, so it needs a tighter budget than the global limit.
+  const heavyRoute = { config: { rateLimit: { max: 6, timeWindow: "1 minute" } } };
+
+  app.post("/tokens/:address/analyze", heavyRoute, async (req, reply) => {
     const { address } = req.params as { address: string };
     const body = (req.body ?? {}) as { async?: boolean; force?: boolean };
     const norm = normalizeAddress(address);
@@ -264,7 +268,7 @@ export async function tokenRoutes(app: FastifyInstance) {
     }
   });
 
-  app.get("/tokens/:address/graph", async (req, reply) => {
+  app.get("/tokens/:address/graph", heavyRoute, async (req, reply) => {
     const { address } = req.params as { address: string };
     const norm = normalizeAddress(address);
     if (!norm) {
