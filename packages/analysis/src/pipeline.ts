@@ -9,7 +9,7 @@ import {
 } from "@rugkiller/shared";
 import { getArcClients, getRobinhoodClients, normalizeAddress } from "@rugkiller/chain";
 import { analyzeContract } from "./contract.js";
-import { analyzeApexiSwap } from "./dex.js";
+import { analyzeApexiSwap, APEXISWAP } from "./dex.js";
 import { analyzeHolders } from "./holders.js";
 import { analyzeLiquidity } from "./liquidity.js";
 import { buildDeployerProfile } from "./deployer.js";
@@ -161,6 +161,10 @@ export async function analyzeToken(opts: AnalyzeTokenOptions): Promise<AnalyzeTo
     explorer: arc.explorer,
     deployer: contract.deployer,
     totalSupply: contract.totalSupply,
+    // The pair holds the float by construction. Counting it made a token with
+    // healthy exit liquidity read as highly concentrated, and named the pool
+    // itself as the suspicious holder.
+    poolAddresses: [dex?.pair?.address, APEXISWAP.router, APEXISWAP.factory],
   });
   allFindings.push(...holders.findings);
   errors.push(...holders.errors);

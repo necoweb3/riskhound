@@ -34,10 +34,19 @@ export async function analyzeHolders(opts: {
   explorer: BlockscoutClient;
   deployer?: string | null;
   totalSupply?: string | null;
+  /**
+   * Contracts that hold supply without owning it: the DEX pair, its router and
+   * factory. A pool holding the float is exit liquidity, not concentration,
+   * and counting it flagged every liquid token as highly concentrated.
+   */
+  poolAddresses?: (string | null | undefined)[];
 }): Promise<HolderAnalysisResult> {
   const errors: string[] = [];
   const findings: RiskFinding[] = [];
   const holders: HolderInfo[] = [];
+  const pooled = new Set(
+    (opts.poolAddresses ?? []).filter(Boolean).map((a) => String(a).toLowerCase())
+  );
   let dataComplete = false;
   let holderListComplete = false;
 
@@ -57,9 +66,10 @@ export async function analyzeHolders(opts: {
       if (opts.deployer && address.toLowerCase() === opts.deployer.toLowerCase()) {
         labels.push("deployer");
       }
-      if (shouldIgnoreForOwnership(address, opts.chain)) {
+      if (shouldIgnoreForOwnership(address, opts.chain) || pooled.has(address.toLowerCase())) {
         labels.push("known_service");
       }
+      if (pooled.has(address.toLowerCase())) labels.push("liquidity_pool");
       holders.push({
         address: address.toLowerCase(),
         balance: bal,
@@ -115,7 +125,7 @@ export async function analyzeHolders(opts: {
       status: "observed",
       summary:
         excludedPct > 0.01
-          ? `Top 10 non-service holders control ~${top10Pct.toFixed(1)}% of tracked supply. A further ~${excludedPct.toFixed(1)}% sits in burn or known service addresses and is excluded.`
+          ? `Top 10 non-service holders control ~${top10Pct.toFixed(1)}% of tracked supply. A further ~${excludedPct.toFixed(1)}% sits in burn, liquidity pool or known service addresses and is excluded.`
           : `Top 10 holders control ~${top10Pct.toFixed(1)}% of tracked supply.`,
       whyItMatters: "Concentrated supply enables sudden dumps.",
       evidence: top10.slice(0, 5).map(

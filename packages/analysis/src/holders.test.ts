@@ -35,6 +35,28 @@ describe("analyzeHolders", () => {
     expect(res.top10Pct).toBeLessThan(80);
   });
 
+  it("does not read exit liquidity as concentration", async () => {
+    // The pair holds the float by construction. Counting it flagged every
+    // liquid token as highly concentrated and named the pool as the culprit.
+    const PAIR = "0x9999999999999999999999999999999999999999";
+    const res = await analyzeHolders({
+      chain: "arc_testnet",
+      token: "0xtoken",
+      explorer: explorerWith([
+        { address: PAIR, value: "850" },
+        { address: "0x1111111111111111111111111111111111111111", value: "60" },
+        { address: "0x2222222222222222222222222222222222222222", value: "50" },
+        { address: "0x3333333333333333333333333333333333333333", value: "40" },
+      ]),
+      totalSupply: SUPPLY,
+      poolAddresses: [PAIR],
+    });
+
+    expect(res.findings.some((f) => f.name === "High top-10 concentration")).toBe(false);
+    const pool = res.holders.find((h) => h.address === PAIR);
+    expect(pool?.labels).toContain("liquidity_pool");
+  });
+
   it("still flags real concentration held by ordinary wallets", async () => {
     const res = await analyzeHolders({
       chain: "arc_testnet",
