@@ -85,7 +85,7 @@ function assessObservedRisk(opts: {
  * is not a budget for the whole read, so several slow calls could still add up
  * past the proxy's limit and the request would die with no response at all.
  */
-const RPC_READ_BUDGET_MS = Number(process.env.OBSERVED_ARC_READ_BUDGET_MS ?? 8_000);
+const RPC_READ_BUDGET_MS = Number(process.env.OBSERVED_ARC_READ_BUDGET_MS ?? 20_000);
 
 function withBudget<T>(work: Promise<T>, fallback: T, ms = RPC_READ_BUDGET_MS): Promise<T> {
   return Promise.race([
@@ -115,11 +115,18 @@ async function readContractOverRpcUnbounded(address: `0x${string}`) {
   const { rpc } = getObservedArcClients();
   if (!rpc) return { ...empty, error: "no rpc configured" };
 
-  // A silent fall back to cache is undebuggable, so the reason travels with it.
-  const probe = await probeCode(rpc, address);
-  if (!probe.ok) return { ...empty, error: probe.error.slice(0, 300) };
+  // None of these three depend on each other, and running them in sequence
+  // stacked three round trips against a public endpoint, which is what pushed
+  // the read past its budget in production.
+  const [probe, blockNumber, meta] = await Promise.all([
+    probeCode(rpc, address),
+    rpc.getBlockNumber().then((b) => b.toString()).catch(() => null),
+    readErc20Meta(rpc, address).catch(() => null),
+  ]);
 
-  const blockNumber = await rpc.getBlockNumber().then((b) => b.toString()).catch(() => null);
+  // A silent fall back to cache is undebuggable, so the reason travels with it.
+  if (!probe.ok) return { ...empty, blockNumber, error: probe.error.slice(0, 300) };
+
   const code = probe.code;
   if (!code) {
     return { ...empty, reachable: true, hasCode: false, blockNumber };
@@ -127,7 +134,6 @@ async function readContractOverRpcUnbounded(address: `0x${string}`) {
 
   const proxy = detectProxyHints(code);
   const selectors = scanSelectors(code);
-  const meta = await readErc20Meta(rpc, address).catch(() => null);
 
   const signals: typeof empty.signals = [];
   if (proxy.isProxy) {
