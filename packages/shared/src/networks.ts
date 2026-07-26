@@ -4,7 +4,7 @@
  * Payment network is independent of analysis networks.
  */
 
-export type NetworkKey = "arc_testnet" | "robinhood" | "base" | "base_sepolia";
+export type NetworkKey = "arc_testnet" | "arc_observed" | "robinhood" | "base" | "base_sepolia";
 
 export interface NetworkConfig {
   key: NetworkKey;
@@ -75,6 +75,28 @@ export function loadNetworksFromEnv(env: NodeJS.ProcessEnv = process.env): Recor
       notes: [
         "USDC is native gas (18 decimals for native, 6 for ERC-20 USDC).",
         "Arc mainnet is not live; this config is testnet-only.",
+      ],
+    },
+    // Chain 5042 is live and reachable over RPC, but its Blockscout instance
+    // was taken down. Contract facts stay readable; anything that needs an
+    // index (holder lists, creator, verified source) does not, and must be
+    // reported as a gap rather than guessed.
+    arc_observed: {
+      key: "arc_observed",
+      name: "Observed Arc network",
+      chainId: Number(env.OBSERVED_ARC_CHAIN_ID ?? 5042),
+      isTestnet: false,
+      isPaymentNetwork: false,
+      isAnalysisNetwork: false,
+      nativeCurrency: { name: "USD Coin", symbol: "USDC", decimals: 18 },
+      rpcUrl: env.OBSERVED_ARC_RPC_URL ?? "https://5042.rpc.thirdweb.com",
+      explorerUrl: env.OBSERVED_ARC_EXPLORER_URL ?? "",
+      explorerApiUrl: env.OBSERVED_ARC_EXPLORER_URL ? `${env.OBSERVED_ARC_EXPLORER_URL}/api` : "",
+      explorerV2Url: env.OBSERVED_ARC_EXPLORER_URL ? `${env.OBSERVED_ARC_EXPLORER_URL}/api/v2` : "",
+      usdcAddress: "0x3600000000000000000000000000000000000000",
+      notes: [
+        "Unannounced network. RPC is reachable; no public explorer is currently available.",
+        "Holder lists, creator addresses and source verification require an explorer and are reported as gaps.",
       ],
     },
     robinhood: {

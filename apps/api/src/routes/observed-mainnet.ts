@@ -1,6 +1,14 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { normalizeAddress } from "@rugkiller/chain";
+import {
+  bytecodeHash,
+  detectProxyHints,
+  getObservedArcClients,
+  normalizeAddress,
+  probeCode,
+  readErc20Meta,
+  scanSelectors,
+} from "@rugkiller/chain";
 import { OBSERVED_ARC_CHAIN, observedArcExplorer } from "@rugkiller/shared";
 import { prisma } from "@rugkiller/db";
 
@@ -64,6 +72,84 @@ function assessObservedRisk(opts: {
     top5Pct,
     signals,
     limitation: "Read-only observed-network assessment; no buy/sell simulation or source-code audit is claimed.",
+  };
+}
+
+/**
+ * Read what the node alone can prove about a contract on chain 5042. This is
+ * everything the explorer used to supply except the parts that need an index:
+ * holder lists, the creator address and source verification.
+ */
+async function readContractOverRpc(address: `0x${string}`) {
+  const empty = {
+    reachable: false,
+    hasCode: false,
+    blockNumber: null as string | null,
+    bytecodeHash: null as string | null,
+    isProxy: false,
+    proxyReasons: [] as string[],
+    selectors: [] as { selector: string; signature: string }[],
+    name: null as string | null,
+    symbol: null as string | null,
+    decimals: null as number | null,
+    totalSupply: null as string | null,
+    owner: null as string | null,
+    signals: [] as Array<{ severity: "low" | "medium" | "high" | "critical"; name: string; detail: string }>,
+  };
+
+  const { rpc } = getObservedArcClients();
+  if (!rpc) return empty;
+
+  const probe = await probeCode(rpc, address);
+  if (!probe.ok) return empty;
+
+  const blockNumber = await rpc.getBlockNumber().then((b) => b.toString()).catch(() => null);
+  const code = probe.code;
+  if (!code) {
+    return { ...empty, reachable: true, hasCode: false, blockNumber };
+  }
+
+  const proxy = detectProxyHints(code);
+  const selectors = scanSelectors(code);
+  const meta = await readErc20Meta(rpc, address).catch(() => null);
+
+  const signals: typeof empty.signals = [];
+  if (proxy.isProxy) {
+    signals.push({
+      severity: "high",
+      name: "Upgradeable contract",
+      detail: `Logic can be replaced after users buy. ${proxy.reasons.join("; ")}`,
+    });
+  }
+  for (const s of selectors) {
+    signals.push({
+      severity: "medium",
+      name: `Privileged function present: ${s.signature}`,
+      detail: "Found in deployed bytecode. Whether it is callable and by whom cannot be confirmed without verified source.",
+    });
+  }
+  if (meta?.owner && !/^0x0{40}$/i.test(meta.owner)) {
+    signals.push({
+      severity: "medium",
+      name: "Owner still has control",
+      detail: `owner() returns ${meta.owner.toLowerCase()}`,
+    });
+  }
+
+  return {
+    reachable: true,
+    hasCode: true,
+    blockNumber,
+    bytecodeHash: bytecodeHash(code),
+    isProxy: proxy.isProxy,
+    proxyReasons: proxy.reasons,
+    selectors,
+    name: meta?.name ?? null,
+    symbol: meta?.symbol ?? null,
+    decimals: meta?.decimals ?? null,
+    totalSupply: meta?.totalSupply ?? null,
+    owner: meta?.owner?.toLowerCase() ?? null,
+    signals,
   };
 }
 
@@ -209,62 +295,102 @@ export async function observedMainnetRoutes(app: FastifyInstance) {
 
     // The explorer being unreachable is not the same fact as the token not
     // existing. Serving 404 for an outage told users a real contract was fake.
+    // Chain 5042 is still reachable over RPC, so contract facts are read live
+    // and only the index-dependent parts are reported as gaps.
     if (!tokenResponse?.ok) {
-      if (!cached) {
+      const live = await readContractOverRpc(normalized);
+
+      if (!live.reachable && !cached) {
         return reply.code(503).send({
-          error: "observed_explorer_unavailable",
-          message: explorer.configured
-            ? "The observed Arc explorer did not answer, and this token is not in the local index yet."
-            : "OBSERVED_ARC_EXPLORER_URL is not configured, so the observed Arc network cannot be read.",
+          error: "observed_network_unavailable",
+          message:
+            "Neither the observed Arc explorer nor its RPC answered, and this token is not in the local index.",
           address: stored,
         });
       }
+      if (live.reachable && !live.hasCode && !cached) {
+        return reply.code(404).send({
+          error: "not_a_contract",
+          message: "The observed Arc RPC reports no bytecode at this address.",
+          address: stored,
+        });
+      }
+
+      const gaps = [
+        {
+          severity: "medium" as const,
+          name: "No explorer for this network",
+          detail:
+            "Holder distribution, creator address and source verification need an index. None is available, so they are unknown rather than clear.",
+        },
+        ...(live.reachable
+          ? []
+          : [{
+              severity: "medium" as const,
+              name: "Live contract read failed",
+              detail: "The RPC did not answer, so the values below come from the last stored record.",
+            }]),
+      ];
+
+      const signals = [...gaps, ...live.signals];
+      const order = { low: 0, medium: 1, high: 2, critical: 3 } as const;
+      const strongest = signals.reduce<keyof typeof order>(
+        (current, s) => (order[s.severity] > order[current] ? s.severity : current),
+        "low"
+      );
+
       return {
         network: { name: "Observed Arc network", chainId: 5042, status: "unannounced" },
-        stale: true,
+        source: live.reachable ? "rpc" : "cache",
         dataGap: {
           source: "observed_arc_explorer",
           reason: explorer.configured ? "explorer_unreachable" : "explorer_not_configured",
           message:
-            "Live explorer data is unavailable, so this is the last stored assessment. Treat it as out of date, not as a current verdict.",
-          assessedAt: cached.updatedAt.toISOString(),
+            "This network has no public explorer right now. Contract code and token metadata are read straight from the node; anything that needs an index is not available.",
+          rpcBlock: live.blockNumber,
         },
         token: {
-          address: cached.address,
-          name: cached.name,
-          symbol: cached.symbol,
-          decimals: cached.decimals,
-          totalSupply: cached.totalSupply,
-          holderCount: cached.holderCount,
-          standard: cached.standard ?? "ERC-20",
-          explorerUrl: explorer.tokenUrl(cached.address),
+          address: stored,
+          name: live.name ?? cached?.name ?? null,
+          symbol: live.symbol ?? cached?.symbol ?? null,
+          decimals: live.decimals ?? cached?.decimals ?? null,
+          totalSupply: live.totalSupply ?? cached?.totalSupply ?? null,
+          holderCount: null,
+          standard: cached?.standard ?? "ERC-20",
+          explorerUrl: explorer.tokenUrl(stored) || null,
         },
         contract: {
-          creator: cached.deployer,
+          creator: cached?.deployer ?? null,
           creationTxHash: null,
-          verified: cached.isVerified,
+          verified: false,
+          verificationKnown: false,
+          owner: live.owner,
+          isProxy: live.isProxy,
+          proxyReasons: live.proxyReasons,
+          bytecodeHash: live.bytecodeHash,
+          riskySelectors: live.selectors,
           explorerMetadataReliable: false,
         },
-        bridgeIntelligence: { linked: false, totalUsdc: 0, transfers: [], limitation: "Live explorer unavailable." },
+        bridgeIntelligence: { linked: false, totalUsdc: 0, transfers: [], limitation: "Requires an explorer index." },
         fundingIntelligence: {
           observedFunder: null,
           linked: false,
           totalUsdc: 0,
           transfers: [],
           confidence: "unavailable",
-          limitation: "Live explorer unavailable.",
+          limitation: "Requires an explorer index.",
         },
         riskAssessment: {
-          level: cached.overallRisk,
+          level:
+            strongest === "critical"
+              ? "critical_risk"
+              : strongest === "high"
+                ? "high_risk"
+                : "caution",
           confidence: "low",
-          signals: [
-            {
-              severity: "medium",
-              name: "Live explorer unavailable",
-              detail: "This assessment could not be refreshed against the chain and may be out of date.",
-            },
-          ],
-          limitation: "Stored assessment served without a live re-check.",
+          signals,
+          limitation:
+            "Read from the node without an index. Absence of a holder or creator signal here means it was not checked, not that it is clean.",
         },
         holders: [],
       };

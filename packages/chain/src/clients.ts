@@ -34,3 +34,9 @@ export function getArcClients(env?: NodeJS.ProcessEnv) {
 export function getRobinhoodClients(env?: NodeJS.ProcessEnv) {
   return getChainClients("robinhood", env);
 }
+
+/** Chain 5042. RPC works; the explorer may be absent, so callers must check. */
+export function getObservedArcClients(env?: NodeJS.ProcessEnv) {
+  const clients = getChainClients("arc_observed", env);
+  return { ...clients, hasExplorer: Boolean(clients.network.explorerV2Url) };
+}

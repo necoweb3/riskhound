@@ -12,13 +12,21 @@ type MainnetToken = {
     decimals: number | null;
     totalSupply: string | null;
     holderCount: number | null;
-    explorerUrl: string;
+    explorerUrl: string | null;
   };
+  /** Present when the network has no explorer and data came from the node. */
+  dataGap?: { source: string; reason: string; message: string; rpcBlock?: string | null } | null;
+  source?: "rpc" | "cache";
   holders: Array<{ address: string; balance: string }>;
   contract: {
     creator: string | null;
     creationTxHash: string | null;
     verified: boolean;
+    verificationKnown?: boolean;
+    owner?: string | null;
+    isProxy?: boolean;
+    bytecodeHash?: string | null;
+    riskySelectors?: Array<{ selector: string; signature: string }>;
     explorerMetadataReliable: boolean;
   };
   bridgeIntelligence: {
@@ -38,8 +46,8 @@ type MainnetToken = {
   riskAssessment: {
     level: string;
     confidence: string;
-    top1Pct: number | null;
-    top5Pct: number | null;
+    top1Pct?: number | null;
+    top5Pct?: number | null;
     signals: Array<{ severity: string; name: string; detail: string }>;
     limitation: string;
   };
@@ -74,10 +82,20 @@ export default async function MainnetTokenPage({ params }: { params: Promise<{ a
         <p className="rk-mono">{token.address}</p>
         <div className="rk-row mt-1">
           <span className={riskClass(data.riskAssessment.level)}>{riskLabel(data.riskAssessment.level)}</span>
-          {!data.contract.verified && <span className="rk-chip">Code not verified</span>}
+          {data.contract.verificationKnown === false
+            ? <span className="rk-chip">Verification unknown</span>
+            : !data.contract.verified && <span className="rk-chip">Code not verified</span>}
+          {data.contract.isProxy && <span className="rk-chip">Upgradeable</span>}
           <span className="rk-chip">{data.riskAssessment.confidence} confidence</span>
         </div>
       </header>
+
+      {data.dataGap && (
+        <div className="rk-alert" role="status">
+          <strong>Partial data.</strong> {data.dataGap.message}
+          {data.dataGap.rpcBlock ? ` Read at block ${data.dataGap.rpcBlock}.` : ""}
+        </div>
+      )}
       <section className="rk-grid-3">
           <div className="rk-card"><span className="rk-eyebrow">SYMBOL</span><strong className="rk-metric">{token.symbol || "Unavailable"}</strong></div>
           <div className="rk-card"><span className="rk-eyebrow">HOLDERS</span><strong className="rk-metric">{token.holderCount?.toLocaleString() ?? "Unavailable"}</strong></div>
@@ -148,7 +166,7 @@ export default async function MainnetTokenPage({ params }: { params: Promise<{ a
         <HolderBubbleMap holders={bubbleHolders} />
       </section>
       <section className="rk-card">
-        <div className="rk-between"><h2 className="rk-h2">Top holders</h2><a className="rk-btn rk-btn--sm" href={token.explorerUrl} target="_blank" rel="noreferrer">Open explorer ↗</a></div>
+        <div className="rk-between"><h2 className="rk-h2">Top holders</h2>{token.explorerUrl ? <a className="rk-btn rk-btn--sm" href={token.explorerUrl} target="_blank" rel="noreferrer">Open explorer ↗</a> : <span className="rk-faint">No explorer for this network</span>}</div>
         <div className="rk-bridge-list">
           {data.holders.slice(0, 20).map((holder) => (
             <div className="rk-bridge-row" key={holder.address}>

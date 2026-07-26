@@ -31,7 +31,7 @@ export async function runBridgeSettlementIndexer() {
       let status = message?.status === "complete" ? "attestation_ready" : "waiting_for_circle";
       let detail = message?.status === "complete" ? "Circle attestation is complete; destination mint is not independently confirmed yet." : "Circle attestation is pending.";
       if (message?.forwardTxHash) {
-        const mintResponse = await fetch(`${arcObserved().apiV2}/transactions/${message.forwardTxHash}`, { signal: AbortSignal.timeout(10_000) }).catch(() => null);
+        const mintResponse = !arcObserved().configured ? null : await fetch(`${arcObserved().apiV2}/transactions/${message.forwardTxHash}`, { signal: AbortSignal.timeout(10_000) }).catch(() => null);
         if (mintResponse?.ok) {
           const mint = (await mintResponse.json()) as { status?: string; result?: string };
           if (mint.status === "ok" || mint.result === "success") {

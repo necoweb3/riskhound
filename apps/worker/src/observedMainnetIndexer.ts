@@ -10,6 +10,26 @@ function query(cursor: Record<string, unknown> | null) {
 }
 
 export async function runObservedMainnetIndexer() {
+  // Chain 5042 has no public explorer at the moment. Token discovery needs an
+  // index, so this indexer has nothing to read until one is configured.
+  // Report that as a source state instead of throwing on a loop.
+  if (!arcObserved().configured) {
+    await prisma.dataSourceHealth.upsert({
+      where: { key: "observed_arc_inventory" },
+      create: {
+        key: "observed_arc_inventory",
+        name: "Observed Arc token inventory",
+        healthy: false,
+        lastError: "OBSERVED_ARC_EXPLORER_URL is not set; token discovery is paused.",
+      },
+      update: {
+        healthy: false,
+        lastError: "OBSERVED_ARC_EXPLORER_URL is not set; token discovery is paused.",
+      },
+    });
+    return;
+  }
+
   let cursor: Record<string, unknown> | null = null;
   let pages = 0;
   let indexed = 0;
