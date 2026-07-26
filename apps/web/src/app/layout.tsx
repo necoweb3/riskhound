@@ -31,7 +31,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         {/* Runs before first paint so the stored theme never flashes. */}
         <script dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
       </head>
-      <body>
+      {/* Extensions (ad blockers, Bitdefender) inject attributes on <body>
+          before hydration; this silences that dev-only warning. */}
+      <body suppressHydrationWarning>
         <a className="rk-skip" href="#main-content">
           Skip to content
         </a>
