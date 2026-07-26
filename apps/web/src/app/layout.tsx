@@ -1,3 +1,4 @@
+import { Suspense } from "react";
 import type { Metadata, Viewport } from "next";
 import Link from "next/link";
 import { Nav } from "@/components/Nav";
@@ -38,7 +39,13 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           Skip to content
         </a>
         <div className="rk-shell">
-          <StatusBar />
+          {/* The status strip probes two explorers and an RPC. Streaming it
+              keeps that off the critical path: every page used to wait on it,
+              including pages that fetch nothing. The placeholder reserves the
+              same height so nothing below shifts when it arrives. */}
+          <Suspense fallback={<div className="rk-statusbar rk-statusbar--pending" aria-hidden="true" />}>
+            <StatusBar />
+          </Suspense>
           <Nav />
           <ScrollChrome />
           <main className="rk-main" id="main-content">

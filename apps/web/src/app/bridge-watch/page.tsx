@@ -85,7 +85,7 @@ export default async function BridgeWatchPage() {
             ? ` Read from the node over the last ${amount(data.supplyIntelligence.mintWindowBlocks)} blocks; the minting account is in the transaction rather than the log, so it is not shown.`
             : ""}
         </p>
-        <div className="rk-table-wrap"><table className="rk-table"><thead><tr><th>Amount</th><th>Recipient</th><th>Minter</th><th>Observed</th><th>Evidence</th></tr></thead><tbody>
+        <div className="rk-table-wrap"><table className="rk-table"><thead><tr><th scope="col">Amount</th><th scope="col">Recipient</th><th scope="col">Minter</th><th scope="col">Observed</th><th scope="col">Evidence</th></tr></thead><tbody>
           {data.supplyIntelligence.recentDirectMints.map((mint) => <tr key={mint.txHash}>
             <td><strong>{amount(mint.amountUsdc, 2)}</strong> USDC</td>
             <td><a className="rk-evidence-link" href={`/wallet/${mint.recipient}`}>{shortAddr(mint.recipient)}</a></td>

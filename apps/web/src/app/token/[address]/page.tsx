@@ -592,7 +592,7 @@ export default async function TokenPage({ params }: { params: Promise<{ address:
             <div className="rk-table-wrap">
               <table className="rk-table">
                 <thead>
-                  <tr><th>Wallet</th><th style={{ textAlign: "right" }}>Share</th><th style={{ textAlign: "right" }}>Balance</th></tr>
+                  <tr><th scope="col">Wallet</th><th scope="col" style={{ textAlign: "right" }}>Share</th><th scope="col" style={{ textAlign: "right" }}>Balance</th></tr>
                 </thead>
                 <tbody>
                   {holders.map((h) => (

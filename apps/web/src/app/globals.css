@@ -3330,3 +3330,8 @@ pre.mono {
   color: var(--text-3);
 }
 .rk-policy__foot a { color: var(--blue); }
+
+/* Reserves the status strip's height while it streams in, so the nav and the
+   page below it do not jump once the real values arrive. */
+.rk-statusbar--pending { visibility: hidden; }
+.rk-statusbar--pending::before { content: "\00a0"; display: block; }

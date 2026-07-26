@@ -114,15 +114,42 @@ export async function metaRoutes(app: FastifyInstance) {
     };
   });
 
+  /**
+   * Source health is rendered in the site's root layout, so every page waited
+   * on it, and the probe hits two explorers and an RPC in sequence. That put a
+   * ~3s floor under pages that fetch nothing at all. Health does not change
+   * second to second, so a short cache and a single in-flight probe are enough.
+   */
+  let sourcesCache: { at: number; value: unknown } | null = null;
+  let sourcesInFlight: Promise<unknown> | null = null;
+  const SOURCES_TTL_MS = Number(process.env.STATUS_SOURCES_TTL_MS ?? 30_000);
+
   app.get("/status/sources", async () => {
+    const now = Date.now();
+    if (sourcesCache && now - sourcesCache.at < SOURCES_TTL_MS) return sourcesCache.value;
+    // Concurrent misses share one probe rather than each starting their own.
+    if (sourcesInFlight) return sourcesInFlight;
+    sourcesInFlight = probeSources()
+      .then((value) => {
+        sourcesCache = { at: Date.now(), value };
+        return value;
+      })
+      .finally(() => {
+        sourcesInFlight = null;
+      });
+    return sourcesInFlight;
+  });
+
+  async function probeSources() {
     const arc = getArcClients();
     const rh = getRobinhoodClients();
     const results = [];
 
-    for (const [key, client, name] of [
+    // Sequential probes stacked three round trips into one request.
+    await Promise.all(([
       ["arc_explorer", arc.explorer, "Arc Blockscout"],
       ["rh_explorer", rh.explorer, "Robinhood Blockscout"],
-    ] as const) {
+    ] as const).map(async ([key, client, name]) => {
       try {
         const b = await client.getLatestBlock();
         const row = await prisma.dataSourceHealth.upsert({
@@ -158,7 +185,7 @@ export async function metaRoutes(app: FastifyInstance) {
         });
         results.push({ key, name, healthy: false, lastError: msg });
       }
-    }
+    }));
 
     // RPC
     try {
@@ -177,8 +204,11 @@ export async function metaRoutes(app: FastifyInstance) {
       });
     }
 
+    // Order is deterministic regardless of which probe answered first.
+    const rank = ["arc_explorer", "arc_rpc", "rh_explorer"];
+    results.sort((a, b) => rank.indexOf(a.key) - rank.indexOf(b.key));
     return { sources: results };
-  });
+  }
 
   app.get("/methodology", async () => ({
     product: "RiskHound",

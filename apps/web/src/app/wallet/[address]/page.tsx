@@ -109,8 +109,8 @@ export default async function WalletPage({
         <table className="rk-table rk-creator-token-table">
           <thead>
             <tr>
-              <th>Token</th>
-              <th>Risk</th>
+              <th scope="col">Token</th>
+              <th scope="col">Risk</th>
             </tr>
           </thead>
           <tbody>
