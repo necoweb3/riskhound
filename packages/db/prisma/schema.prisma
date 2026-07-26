@@ -335,6 +335,9 @@ model DataSourceHealth {
   lastSuccessAt DateTime?
   lastError     String?
   lastBlock     BigInt?
+  // Never written by any indexer today. Kept because dropping a column is a
+  // destructive migration, and `prisma db push` runs unattended on deploy.
+  lagBlocks     Int?
   metaJson      String?
   updatedAt     DateTime @updatedAt
 }
