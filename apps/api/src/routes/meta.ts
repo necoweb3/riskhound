@@ -124,10 +124,10 @@ export async function metaRoutes(app: FastifyInstance) {
   let sourcesInFlight: Promise<unknown> | null = null;
   const SOURCES_TTL_MS = Number(process.env.STATUS_SOURCES_TTL_MS ?? 30_000);
 
-  app.get("/status/sources", async () => {
-    const now = Date.now();
-    if (sourcesCache && now - sourcesCache.at < SOURCES_TTL_MS) return sourcesCache.value;
-    // Concurrent misses share one probe rather than each starting their own.
+  const KEYS = ["arc_explorer", "arc_rpc", "rh_explorer"];
+
+  function refreshSources() {
+    // Concurrent callers share one probe rather than each starting their own.
     if (sourcesInFlight) return sourcesInFlight;
     sourcesInFlight = probeSources()
       .then((value) => {
@@ -138,6 +138,39 @@ export async function metaRoutes(app: FastifyInstance) {
         sourcesInFlight = null;
       });
     return sourcesInFlight;
+  }
+
+  app.get("/status/sources", async () => {
+    const now = Date.now();
+    if (sourcesCache && now - sourcesCache.at < SOURCES_TTL_MS) return sourcesCache.value;
+
+    // A cold probe costs about 7s because it waits on two explorers and an
+    // RPC. The worker already keeps these rows current, so the request answers
+    // from what is stored and the probe runs behind it. Nobody waits on the
+    // network to be told what the network looked like a moment ago.
+    const stored = await prisma.dataSourceHealth
+      .findMany({ where: { key: { in: KEYS } } })
+      .catch(() => []);
+
+    void refreshSources().catch(() => undefined);
+
+    if (!stored.length) {
+      // Nothing recorded yet, so this caller does have to wait for the probe.
+      return refreshSources();
+    }
+
+    const rows = stored
+      .map((row) => ({
+        key: row.key,
+        name: row.name,
+        healthy: row.healthy,
+        lastBlock: row.lastBlock?.toString() ?? null,
+        lastSuccessAt: row.lastSuccessAt?.toISOString() ?? null,
+        lastError: row.lastError,
+      }))
+      .sort((a, b) => KEYS.indexOf(a.key) - KEYS.indexOf(b.key));
+
+    return { sources: rows, servedFrom: "stored" as const };
   });
 
   async function probeSources() {
@@ -187,22 +220,47 @@ export async function metaRoutes(app: FastifyInstance) {
       }
     }));
 
-    // RPC
+    // RPC. Unlike the explorers this row was never persisted, so serving the
+    // endpoint from stored rows would have dropped it and the status strip
+    // would judge Arc on the explorer alone.
+    let rpcRow: { key: string; name: string; healthy: boolean; lastBlock?: string | null; lastError?: string | null };
     try {
       if (arc.rpc) {
         const bn = await arc.rpc.getBlockNumber();
-        results.push({ key: "arc_rpc", name: "Arc RPC", healthy: true, lastBlock: bn.toString() });
+        rpcRow = { key: "arc_rpc", name: "Arc RPC", healthy: true, lastBlock: bn.toString(), lastError: null };
       } else {
-        results.push({ key: "arc_rpc", name: "Arc RPC", healthy: false, lastError: "not configured" });
+        rpcRow = { key: "arc_rpc", name: "Arc RPC", healthy: false, lastBlock: null, lastError: "not configured" };
       }
     } catch (e) {
-      results.push({
+      rpcRow = {
         key: "arc_rpc",
         name: "Arc RPC",
         healthy: false,
+        lastBlock: null,
         lastError: e instanceof Error ? e.message : String(e),
-      });
+      };
     }
+    results.push(rpcRow);
+    await prisma.dataSourceHealth
+      .upsert({
+        where: { key: "arc_rpc" },
+        create: {
+          key: "arc_rpc",
+          name: "Arc RPC",
+          healthy: rpcRow.healthy,
+          lastSuccessAt: rpcRow.healthy ? new Date() : null,
+          lastBlock: rpcRow.lastBlock ? BigInt(rpcRow.lastBlock) : null,
+          lastError: rpcRow.lastError,
+        },
+        update: {
+          healthy: rpcRow.healthy,
+          // Only a real read may refresh the success timestamp.
+          lastSuccessAt: rpcRow.healthy ? new Date() : undefined,
+          lastBlock: rpcRow.lastBlock ? BigInt(rpcRow.lastBlock) : undefined,
+          lastError: rpcRow.lastError,
+        },
+      })
+      .catch(() => undefined);
 
     // Order is deterministic regardless of which probe answered first.
     const rank = ["arc_explorer", "arc_rpc", "rh_explorer"];
