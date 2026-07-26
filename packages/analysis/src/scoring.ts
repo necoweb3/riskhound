@@ -6,10 +6,26 @@ import {
   scoreFromFindings,
   type CategoryScore,
   type DataSourceStatus,
+  type EvidenceRef,
   type RiskCategoryKey,
   type RiskFinding,
   type RiskReport,
 } from "@rugkiller/shared";
+
+/**
+ * Rule: showable onchain. A finding that cannot point at a transaction,
+ * function or holder record is not a risk signal. It stays visible, but it is
+ * reported as a data gap instead of being scored as an observed fact.
+ */
+function requireEvidence(finding: RiskFinding): RiskFinding {
+  if (finding.evidence.length > 0) return finding;
+  return {
+    ...finding,
+    category: "data_gaps",
+    status: "theoretical",
+    whyItMatters: `${finding.whyItMatters} Reported as a gap because no onchain reference was attached.`,
+  };
+}
 
 const ALL_CATEGORIES: RiskCategoryKey[] = [
   "contract",
@@ -29,14 +45,28 @@ export function buildRiskReport(opts: {
   dataSources: DataSourceStatus[];
   lastBlock: number | null;
   modelVersion?: string;
-  buySellFindingHints?: { canBuy: boolean | null; canSell: boolean | null; dataComplete: boolean };
+  chain?: string;
+  tokenAddress?: string;
+  buySellFindingHints?: {
+    canBuy: boolean | null;
+    canSell: boolean | null;
+    dataComplete: boolean;
+    evidence?: EvidenceRef[];
+  };
   deployerHistoryLabel?: "limited_history" | "established" | "unknown";
+  deployerAddress?: string | null;
 }): RiskReport {
   const findings = [...opts.findings];
+  const chain = opts.chain ?? "arc_testnet";
+  const tokenRef = (label: string): EvidenceRef[] =>
+    opts.tokenAddress
+      ? [{ type: "contract", chain, value: opts.tokenAddress, label }]
+      : [];
 
   // Derive buy/sell category findings from simulation hints
   if (opts.buySellFindingHints) {
-    const { canBuy, canSell, dataComplete } = opts.buySellFindingHints;
+    const { canBuy, canSell, dataComplete, evidence } = opts.buySellFindingHints;
+    const simEvidence = evidence?.length ? evidence : tokenRef("Simulated contract");
     if (canBuy === true && canSell === false) {
       findings.push({
         id: "sim-honeypot",
@@ -45,8 +75,8 @@ export function buildRiskReport(opts: {
         severity: "critical",
         status: "observed",
         summary: "Simulation/history suggests acquisition possible but sell transfer failed.",
-      whyItMatters: "Classic honeypot pattern. Users may be unable to exit.",
-        evidence: [],
+        whyItMatters: "Classic honeypot pattern. Users may be unable to exit.",
+        evidence: simEvidence,
         source: "automatic",
       });
     } else if (!dataComplete) {
@@ -58,7 +88,7 @@ export function buildRiskReport(opts: {
         status: "observed",
         summary: "Could not fully verify sellability.",
         whyItMatters: "Unknown sell risk must not be treated as safe.",
-        evidence: [],
+        evidence: simEvidence,
         source: "automatic",
       });
     }
@@ -74,21 +104,27 @@ export function buildRiskReport(opts: {
       summary: "Deployer wallet has little onchain history.",
       whyItMatters:
         "Not automatically malicious. This is shown as limited history, not low risk.",
-      evidence: [],
+      evidence: opts.deployerAddress
+        ? [{ type: "address", chain, value: opts.deployerAddress, label: "Deployer wallet" }]
+        : tokenRef("Analysed contract"),
       source: "automatic",
     });
   }
 
+  const checked = findings.map(requireEvidence);
+
   const categories: CategoryScore[] = ALL_CATEGORIES.map((category) => {
-    const cf = findings.filter((f) => f.category === category);
-    const score = scoreFromFindings(cf);
-    const dataComplete = category === "data_gaps" ? true : !cf.some((f) => f.name.toLowerCase().includes("incomplete"));
+    const cf = checked.filter((f) => f.category === category);
     return {
       category,
-      score: category === "data_gaps" ? scoreFromFindings(cf) : score,
+      score: scoreFromFindings(cf),
       label: CATEGORY_LABELS[category],
       findings: cf,
-      dataComplete,
+      // data_gaps is the record of what is missing, so it is complete by
+      // definition. Any other category is incomplete once it reports a gap.
+      dataComplete:
+        category === "data_gaps" ||
+        !cf.some((f) => f.name.toLowerCase().includes("incomplete") || f.status === "theoretical"),
       explanation:
         cf.length === 0
           ? "No signals in this category from available data."
@@ -99,12 +135,13 @@ export function buildRiskReport(opts: {
     };
   });
 
-  const hasCritical = findings.some((f) => f.severity === "critical");
+  const hasCritical = checked.some((f) => f.severity === "critical");
   const dataGapScore = categories.find((c) => c.category === "data_gaps")?.score ?? 0;
   const overall = aggregateOverall(categories, hasCritical, dataGapScore);
-  const confidence = confidenceFromSources(opts.dataSources, findings.length);
+  const incompleteCategories = categories.filter((c) => !c.dataComplete).length;
+  const confidence = confidenceFromSources(opts.dataSources, incompleteCategories);
 
-  const topFindings = [...findings]
+  const topFindings = [...checked]
     .sort((a, b) => severityRank(b.severity) - severityRank(a.severity))
     .slice(0, 8);
 

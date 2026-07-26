@@ -3140,7 +3140,15 @@ pre.mono {
   letter-spacing: 0.06em;
   color: var(--text-3);
 }
-.rk-enforce__file b { font-weight: 500; color: var(--text-2); }
+.rk-enforce__file b {
+  font-weight: 500;
+  color: var(--text-2);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rk-enforce__file > span { flex-shrink: 0; }
 .rk-enforce__code {
   flex: 1;
   margin: 0;

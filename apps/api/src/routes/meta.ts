@@ -1,10 +1,100 @@
 import type { FastifyInstance } from "fastify";
-import { prisma } from "@rugkiller/db";
-import { DISCLAIMER, OVERALL_LABELS, EVENT_CLASS_LABELS, LINK_STRENGTH_LABELS } from "@rugkiller/shared";
+import { prisma, jparse } from "@rugkiller/db";
+import {
+  DISCLAIMER,
+  OVERALL_LABELS,
+  EVENT_CLASS_LABELS,
+  LINK_STRENGTH_LABELS,
+  type RiskReport,
+} from "@rugkiller/shared";
 import { config } from "../config.js";
 import { getArcClients, getRobinhoodClients } from "@rugkiller/chain";
 
+/** Landing page counters and live sample. Every number is a real row count. */
+async function buildStats() {
+  const [contractsIndexed, findingsWithEvidence, creatorsTracked, latestToken] =
+    await Promise.all([
+      prisma.token.count({ where: { chain: "arc_testnet" } }),
+      // A finding only counts as "with proof" when it carries evidence refs.
+      prisma.finding.count({ where: { evidenceJson: { notIn: ["[]", "null", ""] } } }),
+      prisma.wallet.count({ where: { chain: "arc_testnet" } }),
+      prisma.token.findFirst({
+        where: { chain: "arc_testnet", analysisUpdatedAt: { not: null } },
+        orderBy: { analysisUpdatedAt: "desc" },
+        include: {
+          analyses: { orderBy: { createdAt: "desc" }, take: 1 },
+          simulations: { orderBy: { createdAt: "desc" }, take: 1 },
+        },
+      }),
+    ]);
+
+  const counts = { contractsIndexed, findingsWithEvidence, creatorsTracked };
+  if (!latestToken) return { counts, latest: null };
+
+  const report = jparse<RiskReport | null>(latestToken.analyses[0]?.reportJson, null);
+  const sim = latestToken.simulations[0] ?? null;
+  const findings = report?.topFindings ?? [];
+  const categories = report?.categories ?? [];
+  const scoreOf = (key: string) => categories.find((c) => c.category === key)?.score ?? null;
+  const holderScore = scoreOf("holder_concentration");
+  const crossChainCount = findings.filter((f) => f.category === "cross_chain").length;
+
+  const rows = [
+    {
+      label: "Bytecode and ABI surface",
+      value: latestToken.bytecodeHash ? "READ" : "UNAVAILABLE",
+      tone: latestToken.bytecodeHash ? "green" : "muted",
+    },
+    {
+      label: "Buy leg simulated",
+      value: sim?.canBuy === true ? "PASSED" : sim?.canBuy === false ? "REVERTED" : "UNCLEAR",
+      tone: sim?.canBuy === true ? "green" : sim?.canBuy === false ? "red" : "muted",
+    },
+    {
+      label: "Sell leg simulated",
+      value: sim?.canSell === true ? "PASSED" : sim?.canSell === false ? "REVERTED" : "UNCLEAR",
+      tone: sim?.canSell === true ? "green" : sim?.canSell === false ? "red" : "muted",
+    },
+    {
+      label: "Holder graph resolved",
+      value:
+        latestToken.holderCount != null
+          ? `${latestToken.holderCount} HOLDERS`
+          : "UNAVAILABLE",
+      tone: holderScore != null && holderScore >= 70 ? "amber" : "muted",
+    },
+    {
+      label: "Creator history matched",
+      value: crossChainCount > 0 ? `${crossChainCount} EVENTS` : "NONE FOUND",
+      tone: crossChainCount > 0 ? "amber" : "muted",
+    },
+  ];
+
+  // The dial reads the same number the token report shows: the worst category.
+  const scored = categories.filter((c) => c.category !== "data_gaps");
+  const score = scored.length ? Math.max(...scored.map((c) => c.score)) : null;
+
+  return {
+    counts,
+    latest: {
+      address: latestToken.address,
+      symbol: latestToken.symbol,
+      name: latestToken.name,
+      score,
+      overall: latestToken.overallRisk,
+      overallLabel: latestToken.overallRisk
+        ? OVERALL_LABELS[latestToken.overallRisk as keyof typeof OVERALL_LABELS] ?? null
+        : null,
+      headline: findings[0]?.summary ?? null,
+      analyzedAt: latestToken.analysisUpdatedAt?.toISOString() ?? null,
+      rows,
+    },
+  };
+}
+
 export async function metaRoutes(app: FastifyInstance) {
+  app.get("/stats", async () => buildStats());
+
   app.get("/health", async () => {
     let dbOk = false;
     try {

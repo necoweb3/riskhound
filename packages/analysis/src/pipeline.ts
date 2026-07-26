@@ -218,14 +218,18 @@ export async function analyzeToken(opts: AnalyzeTokenOptions): Promise<AnalyzeTo
     findings: allFindings,
     dataSources,
     lastBlock,
+    chain: "arc_testnet",
+    tokenAddress: addr,
     buySellFindingHints: simulation
       ? {
           canBuy: simulation.canBuy,
           canSell: simulation.canSell,
           dataComplete: simulation.dataComplete,
+          evidence: simulation.steps.flatMap((s) => s.evidence ?? []),
         }
       : undefined,
     deployerHistoryLabel: deployerProfile?.historyLabel,
+    deployerAddress: contract.deployer,
   });
 
   const graph = buildFundingGraph({

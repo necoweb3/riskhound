@@ -1,3 +1,5 @@
+import Link from "next/link";
+
 export default function TermsPage() {
   return (
     <div>
@@ -18,6 +20,18 @@ export default function TermsPage() {
         <p>
           Paid API access is settled via the configured payment network and is independent of
           analysis networks.
+        </p>
+      </div>
+
+      {/* The footer links here as "Terms and policies", so the other policies
+          have to be reachable from this page. */}
+      <div className="card stack mt-2">
+        <h2 style={{ margin: 0, fontSize: 16 }}>Other policies</h2>
+        <p className="rk-footer__links" style={{ margin: 0 }}>
+          <Link href="/legal/privacy">Privacy policy</Link>
+          <Link href="/legal/disclaimer">Risk disclaimer</Link>
+          <Link href="/api-docs">API and pricing</Link>
+          <Link href="/methodology">Methodology</Link>
         </p>
       </div>
     </div>

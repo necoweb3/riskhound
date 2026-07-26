@@ -158,13 +158,16 @@ export function aggregateOverall(
   hasCriticalFinding: boolean,
   dataGapScore: number
 ): OverallRiskLevel {
-  if (dataGapScore >= 80 && categories.every((c) => !c.dataComplete || c.findings.length === 0)) {
-    return "insufficient_data";
-  }
-
+  // A critical finding always elevates. It is never downgraded to a gap,
+  // otherwise incomplete data could bury a confirmed honeypot.
   if (hasCriticalFinding) return "critical_risk";
 
+  // Rule: missing is not safe. Severe gaps with nothing actually observed
+  // report as insufficient_data, never as low risk. data_gaps is excluded
+  // from `scored` because it is the gap itself, not an observation.
   const scored = categories.filter((c) => c.category !== "data_gaps");
+  const nothingObserved = scored.every((c) => c.findings.length === 0);
+  if (dataGapScore >= 80 && nothingObserved) return "insufficient_data";
   if (scored.length === 0) return "insufficient_data";
 
   const max = Math.max(...scored.map((c) => c.score));
@@ -177,13 +180,22 @@ export function aggregateOverall(
   return "low_detected_risk";
 }
 
-export function confidenceFromSources(sources: DataSourceStatus[], findingsCount: number): ConfidenceLevel {
+/**
+ * Confidence describes how much of the analysis actually completed, which is a
+ * separate dimension from how risky the result is. Healthy sources alone are
+ * not enough: a check that could not finish is a gap, and a gap is never
+ * reported with high confidence.
+ */
+export function confidenceFromSources(
+  sources: DataSourceStatus[],
+  incompleteCategories = 0
+): ConfidenceLevel {
   const used = sources.filter((s) => s.usedInThisAnalysis);
-  const healthy = used.filter((s) => s.healthy);
   if (used.length === 0) return "low";
-  const ratio = healthy.length / used.length;
-  if (ratio >= 0.9 && findingsCount >= 0) return "high";
-  if (ratio >= 0.6) return "medium";
+  const ratio = used.filter((s) => s.healthy).length / used.length;
+
+  if (ratio >= 0.9 && incompleteCategories === 0) return "high";
+  if (ratio >= 0.6 && incompleteCategories <= 2) return "medium";
   return "low";
 }
 

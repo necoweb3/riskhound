@@ -4,15 +4,27 @@ export function getApiUrl() {
   return API_URL;
 }
 
+/** A page render must not hang on a stalled API. */
+const REQUEST_TIMEOUT_MS = Number(process.env.API_TIMEOUT_MS ?? 15_000);
+
 export async function apiGet<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_URL}${path}`, {
-    ...init,
-    headers: {
-      accept: "application/json",
-      ...(init?.headers ?? {}),
-    },
-    cache: "no-store",
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${API_URL}${path}`, {
+      ...init,
+      headers: {
+        accept: "application/json",
+        ...(init?.headers ?? {}),
+      },
+      cache: "no-store",
+      signal: init?.signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch (e) {
+    if (e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError")) {
+      throw new Error("The analysis service did not respond in time. Please try again.");
+    }
+    throw new Error("Could not reach the analysis service. Please try again.");
+  }
   if (!res.ok) {
     const body = await res.text();
     throw new Error(friendlyError(res.status, body));

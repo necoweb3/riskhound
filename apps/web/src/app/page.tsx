@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { apiGet, type TokenSummary } from "@/lib/api";
+import { apiGet, shortAddr, type TokenSummary } from "@/lib/api";
 import { TokenCard } from "@/components/TokenCard";
 import { HomeSearch } from "@/components/HomeSearch";
 import { Reveal } from "@/components/Reveal";
@@ -40,26 +40,50 @@ const COVERAGE = [
   { n: "06", title: "Bridge intelligence", body: "Arc-targeted CCTP burns, Circle attestation state, observed mint state and high-value recipients." },
 ];
 
-const LIVE_ROWS = [
-  { label: "Bytecode and ABI surface", value: "READ", tone: "var(--green)" },
-  { label: "Buy leg simulated", value: "PASSED", tone: "var(--green)" },
-  { label: "Sell leg simulated", value: "REVERTED", tone: "var(--red)" },
-  { label: "Holder graph resolved", value: "81.4% TOP 10", tone: "var(--amber)" },
-  { label: "Creator history matched", value: "2 EVENTS", tone: "var(--amber)" },
-];
-
 const DIAL = "M27.8 104.2 A54 54 0 1 1 104.2 104.2";
+/** Length of the 270 degree arc above, so the dial can be filled by score. */
+const DIAL_LEN = 2 * Math.PI * 54 * 0.75;
+
+const TONE: Record<string, string> = {
+  green: "var(--green)",
+  amber: "var(--amber)",
+  red: "var(--red)",
+  muted: "var(--text-3)",
+};
+
+type Stats = {
+  counts: { contractsIndexed: number; findingsWithEvidence: number; creatorsTracked: number };
+  latest: {
+    address: string;
+    symbol: string | null;
+    score: number | null;
+    overallLabel: string | null;
+    headline: string | null;
+    rows: { label: string; value: string; tone: string }[];
+  } | null;
+};
 
 export default async function HomePage() {
   let tokens: TokenSummary[] = [];
   let err: string | null = null;
+  let stats: Stats | null = null;
 
-  try {
-    const data = await apiGet<{ items: TokenSummary[] }>("/tokens?limit=6&sort=newest");
-    tokens = data.items ?? [];
-  } catch (e) {
-    err = e instanceof Error ? e.message : "Could not load tokens";
+  const [tokenRes, statsRes] = await Promise.allSettled([
+    apiGet<{ items: TokenSummary[] }>("/tokens?limit=6&sort=newest"),
+    apiGet<Stats>("/stats"),
+  ]);
+
+  if (tokenRes.status === "fulfilled") {
+    tokens = tokenRes.value.items ?? [];
+  } else {
+    err =
+      tokenRes.reason instanceof Error ? tokenRes.reason.message : "Could not load tokens";
   }
+  // Counters and the live panel are omitted rather than faked when /stats is down.
+  if (statsRes.status === "fulfilled") stats = statsRes.value;
+
+  const latest = stats?.latest ?? null;
+  const dialScore = latest?.score ?? null;
 
   return (
     <div>
@@ -73,50 +97,63 @@ export default async function HomePage() {
           <HomeSearch />
           <p className="rk-hero-note">READ-ONLY &nbsp;&middot;&nbsp; NO WALLET CONNECTION &nbsp;&middot;&nbsp; NO KEYS, EVER</p>
 
-          <Reveal className="rk-hero-stats">
-            <div>
-              <b><CountUp value={1284} /></b>
-              <span>Contracts indexed</span>
-            </div>
-            <div>
-              <b><CountUp value={8412} /></b>
-              <span>Findings with proof</span>
-            </div>
-            <div>
-              <b><CountUp value={946} /></b>
-              <span>Creators tracked</span>
-            </div>
-          </Reveal>
+          {stats && (
+            <Reveal className="rk-hero-stats">
+              <div>
+                <b><CountUp value={stats.counts.contractsIndexed} /></b>
+                <span>Contracts indexed</span>
+              </div>
+              <div>
+                <b><CountUp value={stats.counts.findingsWithEvidence} /></b>
+                <span>Findings with proof</span>
+              </div>
+              <div>
+                <b><CountUp value={stats.counts.creatorsTracked} /></b>
+                <span>Creators tracked</span>
+              </div>
+            </Reveal>
+          )}
         </div>
 
-        <Reveal className="rk-live">
-          <span className="rk-live__scan" aria-hidden="true" />
-          <div className="rk-live__head">
-            <b>Live analysis</b>
-            <span>0x9f2b&hellip;4c71</span>
-          </div>
-          <div className="rk-live__rows">
-            {LIVE_ROWS.map((r, i) => (
-              <div key={r.label} className="rk-live__row" style={{ animationDelay: `${i * 0.55}s` }}>
-                <span>{r.label}</span>
-                <em style={{ color: r.tone }}>{r.value}</em>
-              </div>
-            ))}
-          </div>
-          <div className="rk-live__foot">
-            <span className="rk-live__dial">
-              <svg viewBox="0 0 132 132" width="58" height="58" fill="none" aria-hidden="true">
-                <path d={DIAL} stroke="var(--surface-3)" strokeWidth="11" strokeLinecap="round" />
-                <path d={DIAL} stroke="var(--red)" strokeWidth="11" strokeLinecap="round" />
-              </svg>
-              <span>78</span>
-            </span>
-            <span className="rk-live__verdict">
-              <strong>Critical risk</strong>
-              <span>Selling is blocked while buying stays open.</span>
-            </span>
-          </div>
-        </Reveal>
+        {latest && (
+          <Reveal className="rk-live">
+            <span className="rk-live__scan" aria-hidden="true" />
+            <div className="rk-live__head">
+              <b>Last analysis</b>
+              <Link href={`/token/${latest.address}`}>{shortAddr(latest.address)}</Link>
+            </div>
+            <div className="rk-live__rows">
+              {latest.rows.map((r, i) => (
+                <div key={r.label} className="rk-live__row" style={{ animationDelay: `${i * 0.55}s` }}>
+                  <span>{r.label}</span>
+                  <em style={{ color: TONE[r.tone] ?? "var(--text-3)" }}>{r.value}</em>
+                </div>
+              ))}
+            </div>
+            <div className="rk-live__foot">
+              <span className="rk-live__dial">
+                <svg viewBox="0 0 132 132" width="58" height="58" fill="none" aria-hidden="true">
+                  <path d={DIAL} stroke="var(--surface-3)" strokeWidth="11" strokeLinecap="round" />
+                  {dialScore != null && (
+                    <path
+                      d={DIAL}
+                      stroke={dialScore >= 70 ? "var(--red)" : dialScore >= 40 ? "var(--amber)" : "var(--green)"}
+                      strokeWidth="11"
+                      strokeLinecap="round"
+                      strokeDasharray={DIAL_LEN}
+                      strokeDashoffset={DIAL_LEN * (1 - Math.min(100, Math.max(0, dialScore)) / 100)}
+                    />
+                  )}
+                </svg>
+                <span>{dialScore ?? "--"}</span>
+              </span>
+              <span className="rk-live__verdict">
+                <strong>{latest.overallLabel ?? "Not scored"}</strong>
+                <span>{latest.headline ?? "No findings recorded for this contract."}</span>
+              </span>
+            </div>
+          </Reveal>
+        )}
       </section>
 
       <section className="rk-section">

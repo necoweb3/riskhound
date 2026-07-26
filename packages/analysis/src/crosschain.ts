@@ -103,6 +103,14 @@ export async function compareCrossChain(input: CrossChainInput): Promise<CrossCh
       }
     }
 
+    // One transaction page per address, reused by both checks below.
+    let rhTxs: Awaited<ReturnType<typeof input.rhExplorer.getAddressTransactions>> | null = null;
+    try {
+      rhTxs = await input.rhExplorer.getAddressTransactions(addr);
+    } catch {
+      /* optional */
+    }
+
     // Definitive: same address exists / has activity on Robinhood
     try {
       const rhAddr = await input.rhExplorer.getAddress(addr);
@@ -112,14 +120,7 @@ export async function compareCrossChain(input: CrossChainInput): Promise<CrossCh
           Boolean(rhAddr.coin_balance && rhAddr.coin_balance !== "0") ||
           rhAddr.is_contract;
 
-        // Confirm with at least one tx if possible
-        let txCountHint = 0;
-        try {
-          const txs = await input.rhExplorer.getAddressTransactions(addr);
-          txCountHint = txs.items?.length ?? 0;
-        } catch {
-          /* optional */
-        }
+        const txCountHint = rhTxs?.items?.length ?? 0;
 
         if (hasActivity || txCountHint > 0) {
           const l = link(
@@ -150,9 +151,8 @@ export async function compareCrossChain(input: CrossChainInput): Promise<CrossCh
 
     // Keep deployments as internal identity evidence. Deployment on another
     // chain is not a risk signal by itself and must never be shown as one.
-    try {
-      const txs = await input.rhExplorer.getAddressTransactions(addr);
-      const deploys = (txs.items ?? []).filter((t) => t.created_contract?.hash);
+    {
+      const deploys = (rhTxs?.items ?? []).filter((t) => t.created_contract?.hash);
       if (deploys.length) {
         links.push(
           link(
@@ -174,8 +174,6 @@ export async function compareCrossChain(input: CrossChainInput): Promise<CrossCh
           )
         );
       }
-    } catch {
-      /* optional */
     }
   }
 

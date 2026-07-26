@@ -249,7 +249,9 @@ export async function analyzeHolders(opts: {
       status: "observed",
       summary: "Could not load a reliable holder set from explorer.",
       whyItMatters: "Concentration risk may be understated.",
-      evidence: [],
+      evidence: [
+        { type: "contract", chain: opts.chain, value: opts.token, label: "Token whose holder list failed to load" },
+      ],
       source: "automatic",
     });
   }

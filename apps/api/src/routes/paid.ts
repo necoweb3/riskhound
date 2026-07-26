@@ -239,12 +239,14 @@ export async function paidRoutes(app: FastifyInstance) {
       case "funding_link_between": {
         if (!body.walletB) return reply.code(400).send({ error: "walletB_required" });
         const b = normalizeAddress(body.walletB)?.toLowerCase();
+        if (!b) return reply.code(400).send({ error: "invalid_walletB" });
         const a = norm.toLowerCase();
+        // Both endpoints must appear on the same link. Matching only `a` would
+        // answer "yes" for any wallet that has any link at all.
         const hits = d.crossChainLinks.filter(
           (l) =>
             (l.fromAddress === a && l.toAddress === b) ||
-            (l.fromAddress === b && l.toAddress === a) ||
-            (l.fromAddress === a || l.toAddress === a)
+            (l.fromAddress === b && l.toAddress === a)
         );
         return { ...base, answer: hits.length > 0, links: hits };
       }

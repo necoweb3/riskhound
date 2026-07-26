@@ -21,3 +21,4 @@ export { prisma as db };
 export { jparse, jstr };
 export { loadRootEnv };
 export { persistEvidenceGraph, persistAutomaticRiskEvents } from "./evidence.js";
+export { persistAnalysisResult, type AnalysisResultLike } from "./analysis.js";
