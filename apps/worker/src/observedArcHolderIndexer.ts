@@ -20,6 +20,8 @@ const MAX_LOG_RANGE = 1000;
 /** Bound the work a single tick may do, so one huge token cannot stall the loop. */
 const MAX_RANGE_PER_RUN = 300_000;
 const TOKENS_PER_RUN = Number(process.env.OBSERVED_ARC_HOLDER_BATCH ?? 3);
+/** How many candidates to re-read from the contract when the fold disagrees. */
+const BALANCE_OF_FALLBACK_LIMIT = Number(process.env.OBSERVED_ARC_BALANCEOF_LIMIT ?? 60);
 
 type Log = { topics: string[]; data: string; blockNumber: string; transactionHash: string };
 
@@ -149,17 +151,22 @@ async function indexToken(row: {
 
   const { deltas, logCount, scannedTo } = await scanTransfers(row.address, from, to);
 
-  // Fold the new deltas into the balances already stored for this token.
-  const existing = await prisma.tokenHolder.findMany({
-    where: { tokenId: row.id },
-    select: { address: true, balance: true },
-  });
+  // A scan that starts at the deploy block already covers the whole history,
+  // so folding it onto stored balances would count every transfer twice. That
+  // is what made a mismatched token stay mismatched forever: the reset cursor
+  // forced a full rescan while its old rows were still there.
   const balances = new Map<string, bigint>();
-  for (const h of existing) {
-    try {
-      balances.set(h.address, BigInt(h.balance));
-    } catch {
-      /* a corrupt row is rebuilt from the deltas */
+  if (lastScanned > 0) {
+    const existing = await prisma.tokenHolder.findMany({
+      where: { tokenId: row.id },
+      select: { address: true, balance: true },
+    });
+    for (const h of existing) {
+      try {
+        balances.set(h.address, BigInt(h.balance));
+      } catch {
+        /* a corrupt row is rebuilt from the deltas */
+      }
     }
   }
   for (const [addr, delta] of deltas) {
@@ -167,13 +174,11 @@ async function indexToken(row: {
   }
   balances.delete(ZERO);
 
-  const holders = [...balances.entries()]
+  let holders = [...balances.entries()]
     .filter(([, v]) => v > 0n)
     .sort((a, b) => (b[1] > a[1] ? 1 : b[1] < a[1] ? -1 : 0));
 
-  // Verify the top of the reconstruction against the contract itself. A
-  // mismatch means a log was missed, and a wrong holder table is worse than
-  // an absent one, so nothing is stored in that case.
+  // Check the reconstruction against the contract itself.
   let verified = true;
   for (const [addr, computed] of holders.slice(0, 5)) {
     const onchain = await balanceOf(row.address, addr);
@@ -185,13 +190,46 @@ async function indexToken(row: {
   }
 
   const complete = scannedTo >= head;
+  let source: "transfer_logs" | "balance_of" = "transfer_logs";
+
   if (!verified) {
-    await prisma.indexerCursor.upsert({
-      where: { key: cursorKey },
-      create: { key: cursorKey, lastBlock: 0n, lastAt: new Date(), metaJson: JSON.stringify({ error: "balance_mismatch" }) },
-      update: { lastBlock: 0n, lastAt: new Date(), metaJson: JSON.stringify({ error: "balance_mismatch" }) },
-    });
-    return { address: row.address, skipped: "balance_mismatch" };
+    // Summing Transfer values does not describe every token: a fee-on-transfer
+    // or rebasing contract moves balances without a matching event, so the
+    // sum is legitimately wrong. The address set from the logs is still right,
+    // and balanceOf is authoritative, so ask the contract instead of throwing
+    // the whole token away.
+    if (!complete) {
+      await prisma.indexerCursor.upsert({
+        where: { key: cursorKey },
+        create: { key: cursorKey, lastBlock: 0n, lastAt: new Date(), metaJson: JSON.stringify({ error: "balance_mismatch_partial" }) },
+        update: { lastBlock: 0n, lastAt: new Date(), metaJson: JSON.stringify({ error: "balance_mismatch_partial" }) },
+      });
+      return { address: row.address, skipped: "balance_mismatch_partial_scan" };
+    }
+
+    const candidates = holders.slice(0, BALANCE_OF_FALLBACK_LIMIT).map(([addr]) => addr);
+    const authoritative: [string, bigint][] = [];
+    let unreadable = 0;
+    for (const addr of candidates) {
+      const onchain = await balanceOf(row.address, addr);
+      if (onchain == null) {
+        unreadable++;
+        continue;
+      }
+      if (onchain > 0n) authoritative.push([addr, onchain]);
+    }
+    // If the contract would not answer either, we know nothing. Storing a
+    // partial read as the holder set would understate concentration.
+    if (unreadable > candidates.length / 4) {
+      await prisma.indexerCursor.upsert({
+        where: { key: cursorKey },
+        create: { key: cursorKey, lastBlock: 0n, lastAt: new Date(), metaJson: JSON.stringify({ error: "balance_unreadable" }) },
+        update: { lastBlock: 0n, lastAt: new Date(), metaJson: JSON.stringify({ error: "balance_unreadable" }) },
+      });
+      return { address: row.address, skipped: "balance_unreadable" };
+    }
+    holders = authoritative.sort((a, b) => (b[1] > a[1] ? 1 : b[1] < a[1] ? -1 : 0));
+    source = "balance_of";
   }
 
   const supply = (() => {
@@ -242,16 +280,16 @@ async function indexToken(row: {
       key: cursorKey,
       lastBlock: BigInt(scannedTo),
       lastAt: new Date(),
-      metaJson: JSON.stringify({ holders: holders.length, complete }),
+      metaJson: JSON.stringify({ holders: holders.length, complete, source }),
     },
     update: {
       lastBlock: BigInt(scannedTo),
       lastAt: new Date(),
-      metaJson: JSON.stringify({ holders: holders.length, complete }),
+      metaJson: JSON.stringify({ holders: holders.length, complete, source }),
     },
   });
 
-  return { address: row.address, holders: holders.length, logs: logCount, complete };
+  return { address: row.address, holders: holders.length, logs: logCount, complete, source };
 }
 
 export async function runObservedArcHolderIndexer() {
