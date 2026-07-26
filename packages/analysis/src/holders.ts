@@ -10,6 +10,10 @@ import type { BlockscoutClient } from "@rugkiller/chain";
 
 export interface HolderAnalysisResult {
   holders: HolderInfo[];
+  /** Total holders seen across every fetched page, before the display cap. */
+  holderCount: number | null;
+  /** False when the explorer cursor was still open at the page budget. */
+  holderListComplete: boolean;
   top10Pct: number | null;
   deployerPct: number | null;
   clusters: InsiderCluster[];
@@ -35,9 +39,11 @@ export async function analyzeHolders(opts: {
   const findings: RiskFinding[] = [];
   const holders: HolderInfo[] = [];
   let dataComplete = false;
+  let holderListComplete = false;
 
   try {
-    const res = await opts.explorer.getTokenHolders(opts.token);
+    const res = await opts.explorer.getAllTokenHolders(opts.token);
+    holderListComplete = res.complete;
     const supply = opts.totalSupply ? BigInt(opts.totalSupply) : null;
 
     for (const item of res.items ?? []) {
@@ -64,7 +70,9 @@ export async function analyzeHolders(opts: {
     }
     // Without total supply every share is null, so the category would report
     // zero findings and still call itself complete. That reads as "clean".
-    dataComplete = holders.length > 0 && supply != null && supply > 0n;
+    // A truncated holder list is also incomplete: concentration computed over
+    // part of the holder set understates nothing but proves nothing either.
+    dataComplete = holders.length > 0 && supply != null && supply > 0n && holderListComplete;
   } catch (e) {
     errors.push(e instanceof Error ? e.message : String(e));
   }
@@ -271,7 +279,11 @@ export async function analyzeHolders(opts: {
   }
 
   return {
-    holders: ranked.slice(0, 50),
+    // Keep a generous slice for display; the true count is reported separately
+    // so nothing downstream mistakes the cap for the real holder total.
+    holders: ranked.slice(0, 200),
+    holderCount: holders.length ? holders.length : null,
+    holderListComplete,
     top10Pct,
     deployerPct,
     clusters,

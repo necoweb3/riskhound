@@ -9,7 +9,7 @@ import { eventRoutes } from "./routes/events.js";
 import { watchRoutes } from "./routes/watch.js";
 import { appealRoutes } from "./routes/appeals.js";
 import { adminRoutes } from "./routes/admin.js";
-import { paidRoutes } from "./routes/paid.js";
+import { agentRoutes } from "./routes/agent.js";
 import { metaRoutes } from "./routes/meta.js";
 import { graphRoutes } from "./routes/graph.js";
 import { authRoutes } from "./routes/auth.js";
@@ -101,7 +101,7 @@ async function main() {
   await app.register(watchRoutes);
   await app.register(appealRoutes);
   await app.register(adminRoutes);
-  await app.register(paidRoutes);
+  await app.register(agentRoutes);
 
   app.get("/", async () => ({
     name: "RiskHound API",
@@ -109,7 +109,6 @@ async function main() {
     redis: isRedisUp(),
     docs: `${config.publicUrl}/methodology`,
     agent: `${config.publicUrl}/v1/agent/query`,
-    pricing: `${config.publicUrl}/v1/pricing`,
   }));
 
   await app.listen({ port: config.port, host: "0.0.0.0" });

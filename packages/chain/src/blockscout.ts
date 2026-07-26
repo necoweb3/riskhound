@@ -179,10 +179,15 @@ export class BlockscoutClient {
     }
   }
 
-  async getTokenHolders(address: string, params?: { page?: number; limit?: number }) {
-    const q = qs({
-      // blockscout uses different pagination; try common forms
-    });
+  async getTokenHolders(address: string, params?: Record<string, unknown> | null) {
+    // Blockscout v2 pages by echoing the previous response's next_page_params
+    // back as the query string. These were previously accepted and dropped,
+    // so every caller only ever saw page one.
+    const q = qs(
+      Object.fromEntries(
+        Object.entries(params ?? {}).map(([k, v]) => [k, v == null ? null : String(v)])
+      )
+    );
     const url = `${this.v2Url}/tokens/${address}/holders${q ? `?${q}` : ""}`;
     try {
       return await fetchJson<{
@@ -191,7 +196,7 @@ export class BlockscoutClient {
           value: string;
           token?: BsTokenInfo;
         }[];
-        next_page_params?: unknown;
+        next_page_params?: Record<string, unknown> | null;
       }>(url, this.timeoutMs);
     } catch (e) {
       if (e instanceof BlockscoutError && (e.status === 404 || e.status === 422)) {
@@ -199,6 +204,29 @@ export class BlockscoutClient {
       }
       throw e;
     }
+  }
+
+  /**
+   * Follow the holder cursor so concentration is computed over the real
+   * holder set rather than the first page. Bounded, and it reports whether
+   * it reached the end so callers can tell a full list from a truncated one.
+   */
+  async getAllTokenHolders(address: string, maxPages = 8) {
+    const items: { address: { hash: string } | string; value: string; token?: BsTokenInfo }[] = [];
+    let cursor: Record<string, unknown> | null = null;
+    let complete = false;
+
+    for (let page = 0; page < maxPages; page++) {
+      const res = await this.getTokenHolders(address, cursor);
+      items.push(...(res.items ?? []));
+      cursor = (res.next_page_params ?? null) as Record<string, unknown> | null;
+      if (!cursor || !Object.keys(cursor).length || !(res.items ?? []).length) {
+        complete = true;
+        break;
+      }
+    }
+
+    return { items, complete };
   }
 
   async getTokenTransfers(

@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { getPaymentNetwork, loadNetworksFromEnv, priceFor, type PaidFeature } from "@rugkiller/shared";
+import { loadNetworksFromEnv } from "@rugkiller/shared";
 
 const PLACEHOLDER_SECRETS = new Set(["dev-only-change-me", "change-me-to-a-long-random-string", ""]);
 
@@ -33,13 +33,8 @@ export const config = {
     .filter(Boolean),
   freeAnalysesPerDay: Number(process.env.FREE_ANALYSES_PER_DAY ?? 10),
   freeRpm: Number(process.env.FREE_API_REQUESTS_PER_MINUTE ?? 30),
-  x402Enabled: (process.env.X402_ENABLED ?? "true") === "true",
-  x402Facilitator: process.env.X402_FACILITATOR_URL ?? "https://x402.org/facilitator",
-  paymentRecipient: process.env.PAYMENT_RECIPIENT_ADDRESS ?? "0x0000000000000000000000000000000000000000",
   riskModelVersion: process.env.RISK_MODEL_VERSION ?? "1.0.0",
   networks: loadNetworksFromEnv(),
-  paymentNetwork: getPaymentNetwork(),
-  price: (f: PaidFeature) => priceFor(f),
 };
 
 export function validateProductionConfig() {
@@ -54,10 +49,4 @@ export function validateProductionConfig() {
     throw new Error("ADMIN_WALLETS must contain at least one reviewer wallet in production.");
   }
 
-  if (
-    config.x402Enabled &&
-    /^0x0{40}$/i.test(config.paymentRecipient)
-  ) {
-    throw new Error("PAYMENT_RECIPIENT_ADDRESS must be set before x402 is enabled in production.");
-  }
 }

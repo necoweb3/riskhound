@@ -6,9 +6,10 @@ const BURN = "0x000000000000000000000000000000000000dead";
 const ZERO = "0x0000000000000000000000000000000000000000";
 const SUPPLY = "1000";
 
-function explorerWith(items: { address: string; value: string }[]) {
+function explorerWith(items: { address: string; value: string }[], complete = true) {
   return {
-    getTokenHolders: async () => ({ items }),
+    getAllTokenHolders: async () => ({ items, complete }),
+    getTokenHolders: async () => ({ items, next_page_params: null }),
     getTokenTransfers: async () => ({ items: [] }),
   } as unknown as BlockscoutClient;
 }
@@ -61,6 +62,23 @@ describe("analyzeHolders", () => {
 
     expect(res.dataComplete).toBe(false);
     expect(res.findings.some((f) => f.name === "Holder data incomplete")).toBe(true);
+  });
+
+  it("treats a truncated holder list as incomplete", async () => {
+    const res = await analyzeHolders({
+      chain: "arc_testnet",
+      token: "0xtoken",
+      explorer: explorerWith(
+        [{ address: "0x1111111111111111111111111111111111111111", value: "500" }],
+        false
+      ),
+      totalSupply: SUPPLY,
+    });
+
+    // The explorer cursor was still open, so concentration computed from what
+    // we have proves nothing about the rest of the holder set.
+    expect(res.holderListComplete).toBe(false);
+    expect(res.dataComplete).toBe(false);
   });
 
   it("leaves the deployer share unknown when the deployer is not in the page", async () => {

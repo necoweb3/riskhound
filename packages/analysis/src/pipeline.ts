@@ -263,7 +263,7 @@ export async function analyzeToken(opts: AnalyzeTokenOptions): Promise<AnalyzeTo
     bytecodeHash: contract.bytecodeHash,
     firstLiquidityUsd: null,
     liquidityUsd: liquidity.snapshot.totalUsd,
-    holderCount: holders.holders.length || null,
+    holderCount: holders.holderCount,
     isActive: holders.holders.length > 0 || (simulation?.canBuy ?? null),
     overallRisk: report.overall,
     confidence: report.confidence,

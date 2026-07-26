@@ -1,4 +1,5 @@
 import { prisma } from "@rugkiller/db";
+import { observedArcExplorer } from "@rugkiller/shared";
 
 const RPC = process.env.SOLANA_RPC_URL ?? "https://api.mainnet-beta.solana.com";
 const IRIS = "https://iris-api.circle.com";
@@ -55,7 +56,7 @@ async function ingest(signature: Signature) {
       status: message.status === "complete" ? "attestation_ready" : "waiting_for_circle",
       statusDetail: message.status === "complete" ? "Circle attestation complete; Arc mint verification queued." : "Solana burn observed; Circle attestation pending.",
       sourceExplorerUrl: `${SOLSCAN}/tx/${signature.signature}`,
-      recipientArcExplorerUrl: `https://megaeth-pump-ok-moon.poptyedev.com/address/${recipient}`,
+      recipientArcExplorerUrl: observedArcExplorer().addressUrl(recipient),
       observedAt: new Date((signature.blockTime ?? Math.floor(Date.now() / 1000)) * 1000),
     },
     update: { status: message.status === "complete" ? "attestation_ready" : undefined },

@@ -1,6 +1,7 @@
 import { prisma } from "@rugkiller/db";
+import { observedArcExplorer } from "@rugkiller/shared";
 
-const API = "https://megaeth-pump-ok-moon.poptyedev.com/api/v2";
+const arcObserved = () => observedArcExplorer();
 
 function query(cursor: Record<string, unknown> | null) {
   const params = new URLSearchParams({ type: "ERC-20" });
@@ -13,7 +14,7 @@ export async function runObservedMainnetIndexer() {
   let pages = 0;
   let indexed = 0;
   do {
-    const response = await fetch(`${API}/tokens?${query(cursor)}`, {
+    const response = await fetch(`${arcObserved().apiV2}/tokens?${query(cursor)}`, {
       headers: { accept: "application/json" }, signal: AbortSignal.timeout(20_000),
     });
     if (!response.ok) throw new Error(`Observed Arc explorer returned ${response.status}`);

@@ -321,7 +321,13 @@ export default async function TokenPage({ params }: { params: Promise<{ address:
             <dd style={{ color: top3 >= 50 ? "var(--red)" : top3 >= 25 ? "var(--amber)" : undefined }}>
               {ranked.length ? `${top3.toFixed(1)}%` : "Unknown"}
             </dd>
-            <p>{ranked.length ? `Top 10 hold ${top10.toFixed(1)}%` : "Holder list not available"}</p>
+            <p>
+              {ranked.length
+                ? `Top 10 hold ${top10.toFixed(1)}%`
+                : holders.length
+                  ? `${holders.length} holders listed, shares unknown`
+                  : "Holder list not available"}
+            </p>
           </div>
           <div>
             <dt>Liquidity</dt>
@@ -508,36 +514,50 @@ export default async function TokenPage({ params }: { params: Promise<{ address:
       <Reveal as="section" className="rk-panel">
         <div className="rk-panel-head">
           <span>Supply distribution</span>
-          {summary.holderCount != null && <span style={{ color: "var(--text-4)" }}>{summary.holderCount.toLocaleString("en-US")} holders tracked</span>}
+          {/* Say what is actually on screen, not just the stored count. */}
+          <span style={{ color: "var(--text-4)" }}>
+            {summary.holderCount != null && summary.holderCount > holders.length
+              ? `${holders.length} of ${summary.holderCount.toLocaleString("en-US")} holders shown`
+              : `${holders.length.toLocaleString("en-US")} holders tracked`}
+          </span>
         </div>
 
-        {tracked.length === 0 ? (
+        {holders.length === 0 ? (
           <p className="rk-panel__note" style={{ margin: 0 }}>Holder list not available yet for this token.</p>
         ) : (
           <>
-            <div style={{ padding: "18px 16px 16px" }}>
-              <div className="rk-supply">
-                {tracked.map((h, i) => (
-                  <span
-                    key={h.address}
-                    className="rk-reveal rk-reveal--growX"
-                    title={`${shortAddr(h.address)}: ${(h.pct ?? 0).toFixed(2)}%`}
-                    style={{
-                      width: `${h.pct ?? 0}%`,
-                      background: h.labels?.includes("deployer")
-                        ? "var(--red)"
-                        : `color-mix(in srgb, var(--blue) ${Math.max(28, 96 - i * 8)}%, var(--surface-2))`,
-                    }}
-                  />
-                ))}
-                {rest > 0 && <span style={{ width: `${rest}%`, background: "var(--surface-3)" }} title={`Remaining supply: ${rest.toFixed(1)}%`} />}
+            {/* The share bar needs percentages. The holder list does not, so it
+                must not disappear when total supply is unknown. */}
+            {tracked.length > 0 ? (
+              <div style={{ padding: "18px 16px 16px" }}>
+                <div className="rk-supply">
+                  {tracked.map((h, i) => (
+                    <span
+                      key={h.address}
+                      className="rk-reveal rk-reveal--growX"
+                      title={`${shortAddr(h.address)}: ${(h.pct ?? 0).toFixed(2)}%`}
+                      style={{
+                        width: `${h.pct ?? 0}%`,
+                        background: h.labels?.includes("deployer")
+                          ? "var(--red)"
+                          : `color-mix(in srgb, var(--blue) ${Math.max(28, 96 - i * 8)}%, var(--surface-2))`,
+                      }}
+                    />
+                  ))}
+                  {rest > 0 && <span style={{ width: `${rest}%`, background: "var(--surface-3)" }} title={`Remaining supply: ${rest.toFixed(1)}%`} />}
+                </div>
+                <div className="rk-supply-legend">
+                  <span><i style={{ background: "var(--red)" }} />Creator</span>
+                  <span><i style={{ background: "var(--blue)" }} />Top holders</span>
+                  <span><i style={{ background: "var(--surface-3)" }} />Remaining supply</span>
+                </div>
               </div>
-              <div className="rk-supply-legend">
-                <span><i style={{ background: "var(--red)" }} />Creator</span>
-                <span><i style={{ background: "var(--blue)" }} />Top holders</span>
-                <span><i style={{ background: "var(--surface-3)" }} />Remaining supply</span>
-              </div>
-            </div>
+            ) : (
+              <p className="rk-panel__note" style={{ margin: "14px 16px 0" }}>
+                Total supply is unknown for this token, so ownership shares cannot be calculated.
+                Balances are listed below as returned by the explorer.
+              </p>
+            )}
 
             <div className="rk-table-wrap">
               <table className="rk-table">
@@ -545,11 +565,12 @@ export default async function TokenPage({ params }: { params: Promise<{ address:
                   <tr><th>Wallet</th><th style={{ textAlign: "right" }}>Share</th><th style={{ textAlign: "right" }}>Balance</th></tr>
                 </thead>
                 <tbody>
-                  {holders.slice(0, 15).map((h) => (
+                  {holders.map((h) => (
                     <tr key={h.address}>
                       <td>
                         <Link href={`/wallet/${h.address}`} className="rk-mono">{shortAddr(h.address)}</Link>
                         {h.labels?.includes("deployer") && <span className="rk-chip" style={{ marginLeft: 8 }}>Creator</span>}
+                        {h.labels?.includes("known_service") && <span className="rk-chip" style={{ marginLeft: 8 }}>Service</span>}
                       </td>
                       <td style={{ textAlign: "right" }} className="rk-mono">{h.pct != null ? `${h.pct.toFixed(2)}%` : "-"}</td>
                       <td style={{ textAlign: "right" }} className="rk-mono rk-faint">

@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { prisma } from "@rugkiller/db";
+import { observedArcExplorer } from "@rugkiller/shared";
 
 const BASE_TOKEN_MESSENGER = "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d";
 const BASE_ARC_ROUTER = "0xb3fa262d0fb521cc93be83d87b322b8a23daf3f0";
@@ -8,7 +9,7 @@ const ARC_USDC = "0x3600000000000000000000000000000000000000";
 const ARC_DOMAIN = "26";
 const BASE_DOMAIN = 6;
 const BASE_BLOCKSCOUT = "https://base.blockscout.com";
-const ARC_OBSERVED_EXPLORER = "https://megaeth-pump-ok-moon.poptyedev.com";
+const arcObserved = () => observedArcExplorer();
 const IRIS_API = "https://iris-api.circle.com";
 const CACHE_MS = 5 * 60_000;
 const BLOCKSCOUT_PRO_API_KEY = process.env.BLOCKSCOUT_PRO_API_KEY?.trim() || null;
@@ -112,7 +113,7 @@ type ArcTokenTransfer = {
 async function arcPositions(address: string) {
   if (!/^0x[0-9a-f]{40}$/.test(address)) return [];
   try {
-    const response = await fetch(`${ARC_OBSERVED_EXPLORER}/api/v2/addresses/${address}/token-balances`, {
+    const response = await fetch(`${arcObserved().apiV2}/addresses/${address}/token-balances`, {
       headers: { accept: "application/json" },
       signal: AbortSignal.timeout(8_000),
     });
@@ -140,10 +141,10 @@ async function arcActivity(address: string) {
   if (!/^0x[0-9a-f]{40}$/.test(address)) return [];
   try {
     const [txResponse, transferResponse] = await Promise.all([
-      fetch(`${ARC_OBSERVED_EXPLORER}/api/v2/addresses/${address}/transactions`, {
+      fetch(`${arcObserved().apiV2}/addresses/${address}/transactions`, {
         headers: { accept: "application/json" }, signal: AbortSignal.timeout(8_000),
       }),
-      fetch(`${ARC_OBSERVED_EXPLORER}/api/v2/addresses/${address}/token-transfers`, {
+      fetch(`${arcObserved().apiV2}/addresses/${address}/token-transfers`, {
         headers: { accept: "application/json" }, signal: AbortSignal.timeout(8_000),
       }),
     ]);
@@ -162,7 +163,7 @@ async function arcActivity(address: string) {
         counterparty: tx.to?.hash?.toLowerCase() ?? null,
         tokenAddress: null as string | null,
         tokenSymbol: null as string | null,
-        explorerUrl: tx.hash ? `${ARC_OBSERVED_EXPLORER}/tx/${tx.hash}` : null,
+        explorerUrl: tx.hash ? `${arcObserved().url}/tx/${tx.hash}` : null,
       })),
       ...transfers.map((transfer) => ({
         txHash: transfer.transaction_hash ?? "",
@@ -176,7 +177,7 @@ async function arcActivity(address: string) {
         tokenAddress: transfer.token?.address_hash?.toLowerCase() ?? null,
         tokenSymbol: transfer.token?.symbol || null,
         explorerUrl: transfer.transaction_hash
-          ? `${ARC_OBSERVED_EXPLORER}/tx/${transfer.transaction_hash}`
+          ? `${arcObserved().url}/tx/${transfer.transaction_hash}`
           : null,
       })),
     ];
@@ -201,7 +202,7 @@ function decodeMintInput(input: string | undefined) {
 
 async function arcUsdcIntelligence() {
   try {
-    const response = await fetch(`${ARC_OBSERVED_EXPLORER}/api/v2/addresses/${ARC_USDC}/transactions?filter=to`, {
+    const response = await fetch(`${arcObserved().apiV2}/addresses/${ARC_USDC}/transactions?filter=to`, {
       headers: { accept: "application/json" }, signal: AbortSignal.timeout(12_000),
     });
     if (!response.ok) return { mints: [] as ArcUsdcMint[], totalMintedUsdc: 0 };
@@ -218,7 +219,7 @@ async function arcUsdcIntelligence() {
         recipient: decoded.recipient,
         amountUsdc: decoded.amountUsdc,
         classification: KNOWN_ARC_MINTERS.has(minter) ? "direct_authorized_mint" : "unrecognized_minter",
-        explorerUrl: `${ARC_OBSERVED_EXPLORER}/tx/${tx.hash}`,
+        explorerUrl: `${arcObserved().url}/tx/${tx.hash}`,
       }];
     });
     return { mints, totalMintedUsdc: mints.reduce((sum, mint) => sum + mint.amountUsdc, 0) };
@@ -233,7 +234,7 @@ async function reconciliationAnomalies() {
       fetch(`${IRIS_API}/v2/messages/${probe.sourceDomain}?transactionHash=${probe.sourceTxHash}`, {
         headers: { accept: "application/json" }, signal: AbortSignal.timeout(8_000),
       }).catch(() => null),
-      fetch(`${ARC_OBSERVED_EXPLORER}/api/v2/transactions/${probe.arcTxHash}`, {
+      fetch(`${arcObserved().apiV2}/transactions/${probe.arcTxHash}`, {
         headers: { accept: "application/json" }, signal: AbortSignal.timeout(8_000),
       }).catch(() => null),
     ]);
@@ -252,7 +253,7 @@ async function reconciliationAnomalies() {
           ? "Source message and Arc settlement are consistent."
           : "Arc settlement has not been independently confirmed.",
       sourceExplorerUrl: `${BASE_BLOCKSCOUT}/tx/${probe.sourceTxHash}`,
-      arcExplorerUrl: `${ARC_OBSERVED_EXPLORER}/tx/${probe.arcTxHash}`,
+      arcExplorerUrl: `${arcObserved().url}/tx/${probe.arcTxHash}`,
     };
   }));
 }
@@ -339,7 +340,7 @@ async function loadBridgeWatch() {
       headers: { accept: "application/json" },
       signal: AbortSignal.timeout(12_000),
     }),
-    fetch(`${ARC_OBSERVED_EXPLORER}/api/v2/tokens/${ARC_USDC}`, {
+    fetch(`${arcObserved().apiV2}/tokens/${ARC_USDC}`, {
       headers: { accept: "application/json" },
       signal: AbortSignal.timeout(12_000),
     }),
@@ -410,7 +411,7 @@ async function loadBridgeWatch() {
         amountUsdc,
         observedAt: tx.timestamp as string,
         sourceExplorerUrl: `${sourceExplorer}/tx/${hash}`,
-        recipientArcExplorerUrl: `${ARC_OBSERVED_EXPLORER}/address/${recipient}`,
+        recipientArcExplorerUrl: `${arcObserved().url}/address/${recipient}`,
         priority: amountUsdc >= 100 ? "high_value" : "standard",
         ...state,
       };
@@ -471,7 +472,7 @@ async function loadBridgeWatch() {
     [...highValueByRecipient.entries()].slice(0, 10).map(async ([address, summary]) => ({
       address,
       ...summary,
-      arcExplorerUrl: `${ARC_OBSERVED_EXPLORER}/address/${address}`,
+      arcExplorerUrl: `${arcObserved().url}/address/${address}`,
       ...(await Promise.all([arcPositions(address), arcActivity(address)]).then(([positions, activity]) => ({
         positions,
         activity,
@@ -495,7 +496,7 @@ async function loadBridgeWatch() {
         ...summary,
         label: "High-value system mint recipient",
         disclosure: "Receiving an authorized mint is not evidence of wrongdoing.",
-        arcExplorerUrl: `${ARC_OBSERVED_EXPLORER}/address/${address}`,
+        arcExplorerUrl: `${arcObserved().url}/address/${address}`,
         ...(await Promise.all([arcPositions(address), arcActivity(address)]).then(([positions, activity]) => ({ positions, activity }))),
       }))
   );
@@ -561,7 +562,7 @@ async function loadBridgeWatch() {
       baseArcRouter: BASE_ARC_ROUTER,
       baseExplorer: BASE_BLOCKSCOUT,
       circleAttestationApi: IRIS_API,
-      observedArcExplorer: ARC_OBSERVED_EXPLORER,
+      observedArcExplorer: arcObserved().url || null,
       sourceCoverage: [...CCTP_SOURCES.map((source) => ({
         chain: source.key,
         domain: source.domain,

@@ -89,7 +89,8 @@ export const ARC_PROTOCOL_CONTRACTS: readonly ArcProtocolContract[] = [
 ] as const;
 
 export const ARC_OBSERVED_MAINNET_CHAIN_ID = 5042;
-const ARC_OBSERVED_EXPLORER = "https://megaeth-pump-ok-moon.poptyedev.com";
+/** Empty until OBSERVED_ARC_EXPLORER_URL is set; see networks.ts. */
+const ARC_OBSERVED_EXPLORER = (process.env.OBSERVED_ARC_EXPLORER_URL ?? "").replace(/\/+$/, "");
 
 /**
  * Contracts independently observed on the running, unannounced Arc mainnet.

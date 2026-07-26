@@ -225,12 +225,6 @@ export async function metaRoutes(app: FastifyInstance) {
           explorer: n.explorerUrl,
           testnet: n.isTestnet,
         })),
-      payment: {
-        key: config.paymentNetwork.key,
-        name: config.paymentNetwork.name,
-        chainId: config.paymentNetwork.chainId,
-        note: "Independent of analysis networks. Arc mainnet payments can be enabled via config when available.",
-      },
     },
     limitations: [
         "Arc DEX registries may be incomplete. Liquidity USD can be unavailable.",
@@ -243,6 +237,5 @@ export async function metaRoutes(app: FastifyInstance) {
 
   app.get("/networks", async () => ({
     networks: config.networks,
-    payment: config.paymentNetwork,
   }));
 }

@@ -1,10 +1,9 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { normalizeAddress } from "@rugkiller/chain";
+import { OBSERVED_ARC_CHAIN, observedArcExplorer } from "@rugkiller/shared";
 import { prisma } from "@rugkiller/db";
 
-const EXPLORER = "https://megaeth-pump-ok-moon.poptyedev.com";
-const API = `${EXPLORER}/api/v2`;
 
 type ExplorerToken = {
   address_hash?: string;
@@ -107,7 +106,7 @@ function tokenView(token: ExplorerToken) {
     totalSupply: token.total_supply ?? null,
     holderCount: token.holders_count == null ? null : Number(token.holders_count),
     standard: token.type ?? "ERC-20",
-    explorerUrl: `${EXPLORER}/token/${address}`,
+    explorerUrl: observedArcExplorer().tokenUrl(address),
   };
 }
 
@@ -134,7 +133,7 @@ export async function observedMainnetRoutes(app: FastifyInstance) {
     }).parse(request.query);
     const needle = query.q?.trim();
     const where = {
-      chain: "arc_observed_5042",
+      chain: OBSERVED_ARC_CHAIN,
       ...(query.sort === "critical" ? { overallRisk: "critical_risk" } : {}),
       ...(query.sort === "high_risk" ? { overallRisk: { in: ["critical_risk", "high_risk"] } } : {}),
       ...(!query.includeTests ? {
@@ -168,7 +167,7 @@ export async function observedMainnetRoutes(app: FastifyInstance) {
         totalSupply: token.totalSupply,
         holderCount: token.holderCount,
         standard: token.standard,
-        explorerUrl: `${EXPLORER}/token/${token.address}`,
+        explorerUrl: observedArcExplorer().tokenUrl(token.address),
         riskAssessment: {
           level: token.overallRisk ?? "caution",
           confidence: token.confidence ?? "low",
@@ -180,7 +179,7 @@ export async function observedMainnetRoutes(app: FastifyInstance) {
       pageSize: query.limit,
       totalPages: Math.max(1, Math.ceil(total / query.limit)),
       includeTests: query.includeTests,
-      explorer: EXPLORER,
+      explorer: observedArcExplorer().url || null,
       cached: true,
     };
   });
@@ -193,14 +192,85 @@ export async function observedMainnetRoutes(app: FastifyInstance) {
     // lowercase, so writing the checksummed form created a second Token row
     // for the same contract and the assessment never reached the listing.
     const stored = normalized.toLowerCase();
-    const [tokenResponse, holdersResponse, addressResponse] = await Promise.all([
-      fetch(`${API}/tokens/${normalized}`, { signal: AbortSignal.timeout(15_000) }),
-      fetch(`${API}/tokens/${normalized}/holders`, { signal: AbortSignal.timeout(15_000) }),
-      fetch(`${API}/addresses/${normalized}`, { signal: AbortSignal.timeout(15_000) }),
-    ]);
-    if (!tokenResponse.ok) return reply.code(404).send({ error: "token_not_found" });
+
+    const cached = await prisma.token.findUnique({
+      where: { chain_address: { chain: OBSERVED_ARC_CHAIN, address: stored } },
+    });
+
+    const explorer = observedArcExplorer();
+    const probe = explorer.configured
+      ? await Promise.all([
+          fetch(`${explorer.apiV2}/tokens/${stored}`, { signal: AbortSignal.timeout(15_000) }).catch(() => null),
+          fetch(`${explorer.apiV2}/tokens/${stored}/holders`, { signal: AbortSignal.timeout(15_000) }).catch(() => null),
+          fetch(`${explorer.apiV2}/addresses/${stored}`, { signal: AbortSignal.timeout(15_000) }).catch(() => null),
+        ])
+      : [null, null, null];
+    const [tokenResponse, holdersResponse, addressResponse] = probe;
+
+    // The explorer being unreachable is not the same fact as the token not
+    // existing. Serving 404 for an outage told users a real contract was fake.
+    if (!tokenResponse?.ok) {
+      if (!cached) {
+        return reply.code(503).send({
+          error: "observed_explorer_unavailable",
+          message: explorer.configured
+            ? "The observed Arc explorer did not answer, and this token is not in the local index yet."
+            : "OBSERVED_ARC_EXPLORER_URL is not configured, so the observed Arc network cannot be read.",
+          address: stored,
+        });
+      }
+      return {
+        network: { name: "Observed Arc network", chainId: 5042, status: "unannounced" },
+        stale: true,
+        dataGap: {
+          source: "observed_arc_explorer",
+          reason: explorer.configured ? "explorer_unreachable" : "explorer_not_configured",
+          message:
+            "Live explorer data is unavailable, so this is the last stored assessment. Treat it as out of date, not as a current verdict.",
+          assessedAt: cached.updatedAt.toISOString(),
+        },
+        token: {
+          address: cached.address,
+          name: cached.name,
+          symbol: cached.symbol,
+          decimals: cached.decimals,
+          totalSupply: cached.totalSupply,
+          holderCount: cached.holderCount,
+          standard: cached.standard ?? "ERC-20",
+          explorerUrl: explorer.tokenUrl(cached.address),
+        },
+        contract: {
+          creator: cached.deployer,
+          creationTxHash: null,
+          verified: cached.isVerified,
+          explorerMetadataReliable: false,
+        },
+        bridgeIntelligence: { linked: false, totalUsdc: 0, transfers: [], limitation: "Live explorer unavailable." },
+        fundingIntelligence: {
+          observedFunder: null,
+          linked: false,
+          totalUsdc: 0,
+          transfers: [],
+          confidence: "unavailable",
+          limitation: "Live explorer unavailable.",
+        },
+        riskAssessment: {
+          level: cached.overallRisk,
+          confidence: "low",
+          signals: [
+            {
+              severity: "medium",
+              name: "Live explorer unavailable",
+              detail: "This assessment could not be refreshed against the chain and may be out of date.",
+            },
+          ],
+          limitation: "Stored assessment served without a live re-check.",
+        },
+        holders: [],
+      };
+    }
     const token = (await tokenResponse.json()) as ExplorerToken;
-    const contract = addressResponse.ok ? ((await addressResponse.json()) as ExplorerAddress) : null;
+    const contract = addressResponse?.ok ? ((await addressResponse.json()) as ExplorerAddress) : null;
     const creator = contract?.creator_address_hash?.toLowerCase() ?? null;
     const bridgeLinks = creator
       ? await prisma.bridgeTransferRow.findMany({
@@ -211,7 +281,7 @@ export async function observedMainnetRoutes(app: FastifyInstance) {
       : [];
     let observedFunder: { address: string; txHash: string | null } | null = null;
     if (creator) {
-      const creatorTxResponse = await fetch(`${API}/addresses/${creator}/transactions`, { signal: AbortSignal.timeout(12_000) }).catch(() => null);
+      const creatorTxResponse = await fetch(`${observedArcExplorer().apiV2}/addresses/${creator}/transactions`, { signal: AbortSignal.timeout(12_000) }).catch(() => null);
       if (creatorTxResponse?.ok) {
         const creatorTxs = ((await creatorTxResponse.json()) as { items?: ExplorerTransaction[] }).items ?? [];
         const inbound = [...creatorTxs].reverse().find((tx) =>
@@ -226,7 +296,7 @@ export async function observedMainnetRoutes(app: FastifyInstance) {
           orderBy: { observedAt: "desc" }, take: 10,
         })
       : [];
-    const holderBody = holdersResponse.ok
+    const holderBody = holdersResponse?.ok
       ? ((await holdersResponse.json()) as {
           items?: Array<{ address?: { hash?: string } | string; value?: string }>;
         })
@@ -243,9 +313,9 @@ export async function observedMainnetRoutes(app: FastifyInstance) {
     });
     const view = tokenView(token);
     await prisma.token.upsert({
-      where: { chain_address: { chain: "arc_observed_5042", address: stored } },
+      where: { chain_address: { chain: OBSERVED_ARC_CHAIN, address: stored } },
       create: {
-        chain: "arc_observed_5042",
+        chain: OBSERVED_ARC_CHAIN,
         address: stored,
         name: view.name,
         symbol: view.symbol,

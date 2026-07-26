@@ -29,6 +29,28 @@ export interface NetworkConfig {
   notes?: string[];
 }
 
+/** Storage key for the observed, unannounced Arc network. */
+export const OBSERVED_ARC_CHAIN = "arc_observed_5042";
+
+/**
+ * Explorer for the observed Arc network. This used to be hardcoded in six
+ * files across the API and the worker, so when the host was decommissioned
+ * every mainnet detail lookup, bridge settlement check and CCTP backfill
+ * started failing with no way to repoint them. Set OBSERVED_ARC_EXPLORER_URL
+ * to move it.
+ */
+export function observedArcExplorer(env: NodeJS.ProcessEnv = process.env) {
+  const base = (env.OBSERVED_ARC_EXPLORER_URL ?? "").trim().replace(/\/+$/, "");
+  return {
+    configured: base.length > 0,
+    url: base,
+    apiV2: base ? `${base}/api/v2` : "",
+    addressUrl: (address: string) => (base ? `${base}/address/${address}` : ""),
+    tokenUrl: (address: string) => (base ? `${base}/token/${address}` : ""),
+    txUrl: (hash: string) => (base ? `${base}/tx/${hash}` : ""),
+  };
+}
+
 export function loadNetworksFromEnv(env: NodeJS.ProcessEnv = process.env): Record<NetworkKey, NetworkConfig> {
   return {
     arc_testnet: {
@@ -84,7 +106,7 @@ export function loadNetworksFromEnv(env: NodeJS.ProcessEnv = process.env): Recor
       explorerApiUrl: "https://api.basescan.org/api",
       explorerV2Url: "https://base.blockscout.com/api/v2",
       usdcAddress: env.PAYMENT_USDC_ADDRESS ?? "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-      notes: ["Default x402 settlement network until Arc mainnet payments are available."],
+      notes: ["Reference network for cross-chain evidence. Not an analysis target."],
     },
     base_sepolia: {
       key: "base_sepolia",

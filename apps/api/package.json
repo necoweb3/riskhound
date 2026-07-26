@@ -12,8 +12,6 @@
     "lint": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@circle-fin/x402-batching": "^3.2.0",
-    "@x402/evm": "^2.3.0",
     "@fastify/cors": "^10.0.2",
     "@fastify/rate-limit": "^10.2.2",
     "@rugkiller/analysis": "workspace:*",

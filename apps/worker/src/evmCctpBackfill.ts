@@ -1,8 +1,9 @@
 import { prisma } from "@rugkiller/db";
+import { observedArcExplorer } from "@rugkiller/shared";
 
 const MESSENGER = "0x28b5a0e9c621a5badaa536219b3a228c8168cf5d";
 const ARC_DOMAIN = "26";
-const ARC_EXPLORER = "https://megaeth-pump-ok-moon.poptyedev.com";
+const arcObserved = () => observedArcExplorer();
 const BLOCKSCOUT_PRO_API_KEY = process.env.BLOCKSCOUT_PRO_API_KEY?.trim() || null;
 const SOURCES = [
   { key: "ethereum", chainId: 1, explorer: "https://eth.blockscout.com", usdc: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48" },
@@ -36,7 +37,7 @@ async function scanOne(source: typeof SOURCES[number]) {
     const arcRecipient = recipient(param(tx, "mintRecipient"));
     await prisma.bridgeTransferRow.upsert({
       where: { sourceTxHash: tx.hash },
-      create: { sourceChain: source.key, destinationChain: "arc_observed_5042", sourceTxHash: tx.hash, sender: tx.from?.hash?.toLowerCase() ?? "unknown", recipient: arcRecipient, amountUsdc: Number(param(tx, "amount") ?? 0) / 1_000_000, status: "waiting_for_circle", statusDetail: "Historical Arc-targeted CCTP V2 burn observed; settlement check pending.", sourceExplorerUrl: `${source.explorer}/tx/${tx.hash}`, recipientArcExplorerUrl: `${ARC_EXPLORER}/address/${arcRecipient}`, observedAt: new Date(tx.timestamp) },
+      create: { sourceChain: source.key, destinationChain: "arc_observed_5042", sourceTxHash: tx.hash, sender: tx.from?.hash?.toLowerCase() ?? "unknown", recipient: arcRecipient, amountUsdc: Number(param(tx, "amount") ?? 0) / 1_000_000, status: "waiting_for_circle", statusDetail: "Historical Arc-targeted CCTP V2 burn observed; settlement check pending.", sourceExplorerUrl: `${source.explorer}/tx/${tx.hash}`, recipientArcExplorerUrl: `${arcObserved().url}/address/${arcRecipient}`, observedAt: new Date(tx.timestamp) },
       update: {},
     });
     matched++;

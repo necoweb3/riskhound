@@ -44,11 +44,6 @@ export async function adminRoutes(app: FastifyInstance) {
         pendingEvents,
         payments,
       },
-      paymentNetwork: {
-        key: config.paymentNetwork.key,
-        chainId: config.paymentNetwork.chainId,
-        name: config.paymentNetwork.name,
-      },
       analysisNetworks: Object.values(config.networks)
         .filter((n) => n.isAnalysisNetwork)
         .map((n) => ({ key: n.key, chainId: n.chainId, name: n.name })),
