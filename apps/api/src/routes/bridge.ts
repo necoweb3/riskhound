@@ -331,8 +331,87 @@ async function circleStatus(txHash: string, sourceDomain: number): Promise<Pick<
   }
 }
 
+/**
+ * The Arc-side figures were tied to an explorer that no longer exists, but the
+ * chain itself still answers. Total USDC supply is a plain totalSupply() call,
+ * and a mint is a Transfer out of the zero address, so both are readable from
+ * the node without any index at all.
+ */
+const ARC_RPC = () => process.env.OBSERVED_ARC_RPC_URL ?? "https://5042.rpc.thirdweb.com";
+const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+const ZERO_TOPIC = "0x0000000000000000000000000000000000000000000000000000000000000000";
+/** The provider caps a log query at 1000 blocks. */
+const ARC_LOG_WINDOW = 1000;
+const ARC_MINT_LOOKBACK = Number(process.env.OBSERVED_ARC_MINT_LOOKBACK_BLOCKS ?? 20_000);
+
+async function arcRpc<T>(method: string, params: unknown[], timeoutMs = 8_000): Promise<T | null> {
+  try {
+    const res = await fetch(ARC_RPC(), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) return null;
+    const body = (await res.json()) as { result?: T; error?: unknown };
+    return body.error ? null : (body.result ?? null);
+  } catch {
+    return null;
+  }
+}
+
+async function arcUsdcSupply(): Promise<number | null> {
+  const raw = await arcRpc<string>("eth_call", [{ to: ARC_USDC, data: "0x18160ddd" }, "latest"]);
+  if (!raw || raw === "0x") return null;
+  try {
+    return Number(BigInt(raw)) / 1_000_000;
+  } catch {
+    return null;
+  }
+}
+
+/** Recent mints, read as Transfer events whose sender is the zero address. */
+async function arcRecentMints() {
+  const headHex = await arcRpc<string>("eth_blockNumber", []);
+  if (!headHex) return null;
+  const head = Number(BigInt(headHex));
+  if (!Number.isFinite(head) || head <= 0) return null;
+  const from = Math.max(0, head - ARC_MINT_LOOKBACK);
+
+  const mints: { txHash: string; block: number; recipient: string; amountUsdc: number }[] = [];
+  for (let start = from; start <= head; start += ARC_LOG_WINDOW) {
+    const end = Math.min(start + ARC_LOG_WINDOW - 1, head);
+    const logs = await arcRpc<{ topics: string[]; data: string; blockNumber: string; transactionHash: string }[]>(
+      "eth_getLogs",
+      [{
+        address: ARC_USDC,
+        topics: [TRANSFER_TOPIC, ZERO_TOPIC],
+        fromBlock: `0x${start.toString(16)}`,
+        toBlock: `0x${end.toString(16)}`,
+      }]
+    );
+    // A window that failed is not a window with no mints, so stop rather than
+    // report a partial scan as the recent total.
+    if (logs == null) return null;
+    for (const log of logs) {
+      if (log.topics.length < 3) continue;
+      try {
+        mints.push({
+          txHash: log.transactionHash,
+          block: Number(BigInt(log.blockNumber)),
+          recipient: `0x${log.topics[2].slice(26)}`.toLowerCase(),
+          amountUsdc: Number(BigInt(log.data === "0x" ? "0x0" : log.data)) / 1_000_000,
+        });
+      } catch {
+        /* a malformed log is skipped, not counted as zero */
+      }
+    }
+  }
+  return { mints: mints.slice(-25).reverse(), windowBlocks: head - from, head };
+}
+
 async function loadBridgeWatch() {
-  const [sourceResults, routerResult, arcUsdcResponse, usdcIntelligence, anomalies, tokenStats, liquidityStats] = await Promise.all([
+  const [sourceResults, routerResult, arcUsdcResponse, usdcIntelligence, anomalies, tokenStats, liquidityStats, rpcSupply, rpcMints] = await Promise.all([
     Promise.allSettled(CCTP_SOURCES.map(async (source) => {
       const response = await fetch(blockscoutApiUrl(
         source.chainId,
@@ -371,6 +450,8 @@ async function loadBridgeWatch() {
       where: { chain: "arc_observed_5042", liquidityUsd: { not: null } },
       _count: { liquidityUsd: true }, _sum: { liquidityUsd: true },
     }),
+    arcUsdcSupply(),
+    arcRecentMints(),
   ]);
   const sourceBodies = sourceResults.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
   const routerBody = routerResult.body;
@@ -517,7 +598,8 @@ async function loadBridgeWatch() {
         ...(await Promise.all([arcPositions(address), arcActivity(address)]).then(([positions, activity]) => ({ positions, activity }))),
       }))
   );
-  const supplyUsdc = arcUsdc?.total_supply ? Number(arcUsdc.total_supply) / 1_000_000 : null;
+  const explorerSupply = arcUsdc?.total_supply ? Number(arcUsdc.total_supply) / 1_000_000 : null;
+  const supplyUsdc = explorerSupply ?? rpcSupply;
   const measuredLiquidityUsd = liquidityStats._sum.liquidityUsd ?? null;
   return {
     network: {
@@ -549,14 +631,41 @@ async function loadBridgeWatch() {
     },
     landed: {
       usdc: supplyUsdc,
-      source: "Observed Arc USDC total supply",
-      live: Boolean(arcUsdc?.total_supply),
+      source:
+        explorerSupply != null
+          ? "Observed Arc USDC total supply"
+          : rpcSupply != null
+            ? "USDC totalSupply() read from the Arc node"
+            : "Observed Arc USDC total supply",
+      live: supplyUsdc != null,
     },
     transfers,
     trackedWallets,
     supplyIntelligence: {
-      recentDirectMints: usdcIntelligence.mints,
-      recentDirectMintUsdc: usdcIntelligence.totalMintedUsdc,
+      // The explorer feed names the minter. The node feed cannot, because the
+      // caller is in the transaction and not in the log, so that field stays
+      // null rather than being filled with a guess.
+      recentDirectMints: usdcIntelligence.mints.length
+        ? usdcIntelligence.mints
+        : (rpcMints?.mints ?? []).map((m) => ({
+            txHash: m.txHash,
+            block: m.block,
+            observedAt: null,
+            minter: null,
+            recipient: m.recipient,
+            amountUsdc: m.amountUsdc,
+            classification: "mint_observed" as const,
+            explorerUrl: arcTxUrl(m.txHash),
+          })),
+      recentDirectMintUsdc: usdcIntelligence.mints.length
+        ? usdcIntelligence.totalMintedUsdc
+        : (rpcMints?.mints ?? []).reduce((sum, m) => sum + m.amountUsdc, 0),
+      mintSource: usdcIntelligence.mints.length
+        ? "explorer"
+        : rpcMints
+          ? "rpc"
+          : "unavailable",
+      mintWindowBlocks: usdcIntelligence.mints.length ? null : rpcMints?.windowBlocks ?? null,
       knownMinters: [...KNOWN_ARC_MINTERS],
       classificationNote: "Direct authorized mint means the caller has mint authority. It does not prove a CCTP settlement or wrongdoing.",
     },

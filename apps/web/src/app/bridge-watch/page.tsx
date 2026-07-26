@@ -11,7 +11,7 @@ type BridgeWatch = {
   landed: { usdc: number | null; source: string; live: boolean };
   transfers: Array<{ sourceChain: string; sourceTxHash: string; sender: string; recipient: string; amountUsdc: number; observedAt: string; status: "waiting_for_circle" | "attestation_ready" | "status_unavailable"; statusDetail: string; sourceExplorerUrl: string; recipientArcExplorerUrl: string | null; priority: "standard" | "high_value" }>;
   trackedWallets: Array<{ address: string; committedUsdc: number; lastSeenAt: string; arcExplorerUrl: string | null; positions: Position[]; activity: Activity[] }>;
-  supplyIntelligence: { recentDirectMints: Array<{ txHash: string; observedAt: string; minter: string; recipient: string; amountUsdc: number; classification: string; explorerUrl: string }>; recentDirectMintUsdc: number; classificationNote: string };
+  supplyIntelligence: { recentDirectMints: Array<{ txHash: string; observedAt: string | null; minter: string | null; recipient: string; amountUsdc: number; classification: string; explorerUrl: string | null }>; recentDirectMintUsdc: number; mintSource?: "explorer" | "rpc" | "unavailable"; mintWindowBlocks?: number | null; classificationNote: string };
   reconciliation: { anomalies: Array<{ sourceTxHash: string; arcTxHash: string; amountUsdc: number; circleStatus: string; arcConfirmed: boolean; classification: string; detail: string; sourceExplorerUrl: string; arcExplorerUrl: string }> };
   liquidityPressure: { tokenCount: number; usdcSupply: number | null; usdcPerIndexedToken: number | null; measuredDexLiquidityUsd: number | null; tokensWithMeasuredLiquidity: number; coverageComplete: boolean; note: string };
   systemMintRecipients: Array<{ address: string; mintedUsdc: number; lastMintAt: string; disclosure: string; arcExplorerUrl: string | null; positions: Position[]; activity: Activity[] }>;
@@ -66,28 +66,32 @@ export default async function BridgeWatchPage() {
           <p className="rk-faint rk-zero">
             Chain 5042 has no public explorer at the moment. Source burns, Circle attestation state
             and the persistent index above are read from Base and Circle and are unaffected. Total
-            USDC supply on Arc, supply per indexed token, verified DEX liquidity and the direct-mint
-            feed all need an index on Arc itself, so they are reported as unknown rather than zero.
+            USDC supply and recent mints are read straight from the Arc node instead. Verified DEX
+            liquidity needs a pool index, so it stays unknown rather than being reported as zero.
           </p>
           <div className="rk-row">
-            <span className="rk-chip">USDC on Arc</span>
-            <span className="rk-chip">USDC per token</span>
             <span className="rk-chip">Verified DEX liquidity</span>
-            <span className="rk-chip">Direct mints</span>
+            <span className="rk-chip">Creator and holder data per token</span>
           </div>
         </section>
       )}
 
-      {(arcExplorer || data.supplyIntelligence.recentDirectMints.length > 0) && (
+      {data.supplyIntelligence.recentDirectMints.length > 0 && (
       <section className="rk-card rk-stack">
         <div className="rk-between"><div><span className="rk-eyebrow">USDC SUPPLY INTELLIGENCE</span><h2 className="rk-section-title">Recent direct mints</h2></div><strong>{amount(data.supplyIntelligence.recentDirectMintUsdc, 2)} USDC</strong></div>
-        <p className="rk-faint rk-zero">{data.supplyIntelligence.classificationNote}</p>
+        <p className="rk-faint rk-zero">
+          {data.supplyIntelligence.classificationNote}
+          {data.supplyIntelligence.mintSource === "rpc" && data.supplyIntelligence.mintWindowBlocks
+            ? ` Read from the node over the last ${amount(data.supplyIntelligence.mintWindowBlocks)} blocks; the minting account is in the transaction rather than the log, so it is not shown.`
+            : ""}
+        </p>
         <div className="rk-table-wrap"><table className="rk-table"><thead><tr><th>Amount</th><th>Recipient</th><th>Minter</th><th>Observed</th><th>Evidence</th></tr></thead><tbody>
           {data.supplyIntelligence.recentDirectMints.map((mint) => <tr key={mint.txHash}>
             <td><strong>{amount(mint.amountUsdc, 2)}</strong> USDC</td>
             <td><a className="rk-evidence-link" href={`/wallet/${mint.recipient}`}>{shortAddr(mint.recipient)}</a></td>
-            <td className="rk-mono">{shortAddr(mint.minter)}</td><td>{timeAgo(mint.observedAt)}</td>
-            <td><a className="rk-evidence-link" href={mint.explorerUrl} target="_blank" rel="noreferrer">Open transaction</a></td>
+            <td className="rk-mono">{mint.minter ? shortAddr(mint.minter) : "Not shown"}</td>
+            <td>{timeAgo(mint.observedAt) ?? "-"}</td>
+            <td>{mint.explorerUrl ? <a className="rk-evidence-link" href={mint.explorerUrl} target="_blank" rel="noreferrer">Open transaction</a> : <span className="rk-faint">No explorer</span>}</td>
           </tr>)}
         </tbody></table></div>
       </section>
