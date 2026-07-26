@@ -8,12 +8,9 @@ type Item = { label: string; hint: string; href: string; keys?: string };
 const ITEMS: Item[] = [
   { label: "Discover", hint: "Token inventory", href: "/feed", keys: "G D" },
   { label: "Check a token", hint: "Paste a contract", href: "/scan", keys: "G C" },
-  { label: "Watchlist", hint: "Pinned tokens and alerts", href: "/watchlist", keys: "G W" },
   { label: "Creators", hint: "Wallet intelligence", href: "/wallets", keys: "G R" },
   { label: "Bridge watch", hint: "Arc capital flow", href: "/bridge-watch", keys: "G B" },
-  { label: "Risk events", hint: "Indexer output", href: "/events", keys: "G E" },
   { label: "How it works", hint: "Methodology", href: "/methodology" },
-  { label: "API and pricing", hint: "Endpoints, x402", href: "/api-docs" },
   { label: "Appeal a finding", hint: "Manual review", href: "/appeals" },
   { label: "Terms of use", hint: "Legal", href: "/legal/terms" },
 ];

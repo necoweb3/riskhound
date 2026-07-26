@@ -18,7 +18,7 @@
   --r: 8px;
   --r-sm: 6px;
   --r-xs: 4px;
-  --nav: 53px;
+  --nav: 58px;
   --max: 1360px;
   --ease: cubic-bezier(0.2, 0.8, 0.3, 1);
 
@@ -372,20 +372,18 @@ summary:focus-visible {
   color: var(--text);
 }
 .rk-logo__mark {
-  width: 27px;
-  height: 27px;
+  width: 38px;
+  height: 38px;
   flex-shrink: 0;
   display: block;
-  overflow: hidden;
-  border: 1px solid var(--line);
-  border-radius: var(--r-sm);
-  background: var(--surface-2);
+  border: 0;
+  background: none;
+  border-radius: 0;
 }
 .rk-logo__mark img {
   width: 100%;
   height: 100%;
-  object-fit: cover;
-  object-position: 34% 40%;
+  object-fit: contain;
 }
 
 .rk-nav__links {
@@ -1042,7 +1040,7 @@ summary:focus-visible {
 /* Features */
 .rk-features {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(268px, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 1px;
   background: var(--line);
   border: 1px solid var(--line);
@@ -3035,3 +3033,157 @@ pre.mono {
 }
 .rk-supply-legend span { display: inline-flex; align-items: center; gap: 6px; }
 .rk-supply-legend i { width: 8px; height: 8px; border-radius: 2px; }
+
+
+/* ==========================================================================
+   Coverage and principles polish
+   ========================================================================== */
+
+@media (max-width: 980px) { .rk-features { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 620px) { .rk-features { grid-template-columns: 1fr; } }
+
+.rk-feature { position: relative; overflow: hidden; }
+.rk-feature::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 2px;
+  background: var(--blue);
+  transform: scaleX(0);
+  transform-origin: left center;
+  transition: transform 0.34s var(--ease);
+}
+.rk-feature:hover::before { transform: scaleX(1); }
+.rk-feature__num { transition: color 0.2s var(--ease); }
+.rk-feature:hover .rk-feature__num { color: var(--blue); }
+.rk-feature h3 { transition: transform 0.24s var(--ease); }
+.rk-feature:hover h3 { transform: translateX(2px); }
+
+.rk-section__intro { max-width: 62ch; margin: 0 0 26px; }
+.rk-section__intro h2 { margin: 0 0 10px; font-size: 23px; font-weight: 600; letter-spacing: -0.02em; }
+.rk-section__intro p { margin: 0; font-size: 13.5px; line-height: 1.6; color: var(--text-2); }
+
+.rk-footer__brand { display: flex; align-items: center; gap: 10px; }
+.rk-footer__logo { width: 28px; height: 28px; flex-shrink: 0; object-fit: contain; opacity: 0.85; }
+
+
+/* ==========================================================================
+   Enforced in code: rule list paired with the guard that implements it
+   ========================================================================== */
+
+.rk-enforce {
+  display: grid;
+  grid-template-columns: minmax(0, 0.82fr) minmax(0, 1.18fr);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: var(--surface);
+  overflow: hidden;
+}
+@media (max-width: 900px) { .rk-enforce { grid-template-columns: 1fr; } }
+
+.rk-enforce__list { border-right: 1px solid var(--line); }
+@media (max-width: 900px) { .rk-enforce__list { border-right: 0; border-bottom: 1px solid var(--line); } }
+
+.rk-enforce__item {
+  position: relative;
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+  width: 100%;
+  padding: 18px 20px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.18s var(--ease);
+}
+.rk-enforce__item:last-child { border-bottom: 0; }
+.rk-enforce__item:hover { background: var(--surface-2); }
+.rk-enforce__item::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 2px;
+  background: var(--blue);
+  transform: scaleY(0);
+  transform-origin: top center;
+  transition: transform 0.3s var(--ease);
+}
+.rk-enforce__item.is-active { background: var(--surface-2); }
+.rk-enforce__item.is-active::before { transform: scaleY(1); }
+
+.rk-enforce__n {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.09em;
+  color: var(--text-4);
+  padding-top: 3px;
+  transition: color 0.2s var(--ease);
+}
+.rk-enforce__item.is-active .rk-enforce__n { color: var(--blue); }
+.rk-enforce__t { display: block; font-size: 14.5px; font-weight: 600; letter-spacing: -0.016em; margin-bottom: 5px; }
+.rk-enforce__b { display: block; font-size: 12.5px; line-height: 1.5; color: var(--text-2); }
+
+.rk-enforce__pane { display: flex; flex-direction: column; background: var(--bg); }
+.rk-enforce__file {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  color: var(--text-3);
+}
+.rk-enforce__file b { font-weight: 500; color: var(--text-2); }
+.rk-enforce__code {
+  flex: 1;
+  margin: 0;
+  padding: 18px 16px;
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-2);
+  white-space: pre;
+  animation: rk-fade 0.24s var(--ease) both;
+}
+.rk-enforce__code .k { color: var(--violet); }
+.rk-enforce__code .s { color: var(--green); }
+.rk-enforce__code .c { color: var(--text-4); font-style: italic; }
+.rk-enforce__code .f { color: var(--blue); }
+.rk-enforce__caption {
+  padding: 12px 16px;
+  border-top: 1px solid var(--line);
+  background: var(--surface-2);
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-3);
+}
+
+
+/* Coverage numbers carry the accent, the CTA is the one inverted block */
+.rk-feature__num { color: var(--blue); display: inline-flex; align-items: center; gap: 8px; }
+.rk-feature__num::before { content: ""; width: 5px; height: 5px; border-radius: 1px; background: currentColor; }
+.rk-feature:hover .rk-feature__num { color: var(--blue); }
+
+.rk-cta {
+  border-color: var(--solid);
+  background: var(--solid);
+  color: var(--solid-tx);
+}
+.rk-cta p { color: inherit; opacity: 0.7; }
+.rk-cta .rk-btn--primary { background: var(--blue); border-color: var(--blue); color: #fff; }
+.rk-cta .rk-btn--primary:hover { background: var(--blue); color: #fff; opacity: 0.88; }
+.rk-cta .rk-btn:not(.rk-btn--primary) {
+  background: transparent;
+  border-color: currentColor;
+  color: inherit;
+  opacity: 0.8;
+}
+.rk-cta .rk-btn:not(.rk-btn--primary):hover { background: transparent; opacity: 1; }

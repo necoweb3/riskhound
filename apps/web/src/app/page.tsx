@@ -4,6 +4,7 @@ import { TokenCard } from "@/components/TokenCard";
 import { HomeSearch } from "@/components/HomeSearch";
 import { Reveal } from "@/components/Reveal";
 import { CountUp } from "@/components/CountUp";
+import { EnforcedInCode } from "@/components/EnforcedInCode";
 
 export const dynamic = "force-dynamic";
 
@@ -37,13 +38,6 @@ const COVERAGE = [
   { n: "04", title: "Supply ownership", body: "Top-holder concentration, deployer holdings, linked wallets and insider clusters." },
   { n: "05", title: "Creator history", body: "Previous deployments, first funders, connected addresses and evidence-confirmed harmful activity." },
   { n: "06", title: "Bridge intelligence", body: "Arc-targeted CCTP burns, Circle attestation state, observed mint state and high-value recipients." },
-];
-
-const PRINCIPLES = [
-  { n: "01", title: "Showable onchain", body: "Every risk signal links to the transaction, function or holder record that produced it." },
-  { n: "02", title: "Missing is not safe", body: "An unavailable data source is reported as a gap, never scored as an absence of risk." },
-  { n: "03", title: "No labels without evidence", body: "No automatic scammer labels. Confirmed events require reviewable proof." },
-  { n: "04", title: "Payment is not analysis", body: "The chain that settles a payment never decides which chain gets analysed." },
 ];
 
 const LIVE_ROWS = [
@@ -190,28 +184,17 @@ export default async function HomePage() {
       </section>
 
       <section className="rk-section">
-        <div className="rk-principles">
-          <div>
-            <p className="rk-eyebrow">Enforced in code</p>
-            <h2 style={{ margin: "0 0 12px", fontSize: 23, fontWeight: 600, letterSpacing: "-0.02em" }}>
-              Rules we do not bend
-            </h2>
-            <p className="rk-lead" style={{ maxWidth: "38ch", fontSize: 13.5 }}>
-              Risk scores are never generated, inferred or softened. A missing data source is reported as missing.
-            </p>
-          </div>
-          <div>
-            {PRINCIPLES.map((p) => (
-              <Reveal key={p.n} className="rk-principle">
-                <span>{p.n}</span>
-                <div>
-                  <strong>{p.title}</strong>
-                  <p>{p.body}</p>
-                </div>
-              </Reveal>
-            ))}
-          </div>
+        <div className="rk-section__intro">
+          <p className="rk-eyebrow">Enforced in code</p>
+          <h2>Rules we do not bend</h2>
+          <p>
+            Risk scores are never generated, inferred or softened. Pick a rule to see the guard that
+            implements it.
+          </p>
         </div>
+        <Reveal>
+          <EnforcedInCode />
+        </Reveal>
       </section>
 
       <section className="rk-section">

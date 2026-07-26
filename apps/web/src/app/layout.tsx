@@ -46,23 +46,23 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           </main>
           <footer className="rk-footer">
             <div className="rk-footer__inner">
-              <p>
-                Built on Arc. Arc&trade; is a trademark of Circle. Not financial advice.{" "}
-                <a
-                  className="rk-footer__credit"
-                  href="https://x.com/necoweb3"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  Built by @necoweb3
-                </a>
+              <p className="rk-footer__brand" style={{ margin: 0 }}>
+                <img className="rk-footer__logo" src="/riskhound-logo.png" alt="" width={28} height={28} />
+                <span style={{ fontSize: 12, lineHeight: 1.5, color: "var(--text-3)" }}>
+                  Built on Arc. Arc&trade; is a trademark of Circle. Not financial advice.{" "}
+                  <a
+                    className="rk-footer__credit"
+                    href="https://x.com/necoweb3"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    Built by @necoweb3
+                  </a>
+                </span>
               </p>
               <div className="rk-footer__links">
                 <Link href="/methodology">How it works</Link>
-                <Link href="/api-docs">API</Link>
-                <Link href="/legal/terms">Terms</Link>
-                <Link href="/legal/privacy">Privacy</Link>
-                <Link href="/legal/disclaimer">Disclaimer</Link>
+                <Link href="/legal/terms">Terms and policies</Link>
                 <Link href="/appeals">Appeal</Link>
               </div>
             </div>

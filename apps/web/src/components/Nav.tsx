@@ -11,9 +11,7 @@ const links = [
   { href: "/feed", label: "Discover", also: ["/mainnet", "/token"] },
   { href: "/scan", label: "Check", also: [] as string[] },
   { href: "/wallets", label: "Creators", also: ["/wallet"] },
-  { href: "/watchlist", label: "Watchlist", also: [] as string[] },
   { href: "/bridge-watch", label: "Bridge", also: [] as string[] },
-  { href: "/events", label: "Events", also: [] as string[] },
 ];
 
 export function Nav() {
@@ -25,7 +23,7 @@ export function Nav() {
       <div className="rk-nav__inner">
         <Link href="/" className="rk-logo" onClick={() => setOpen(false)}>
           <span className="rk-logo__mark">
-            <Image src="/riskhound-logo.png" alt="" width={27} height={27} priority />
+            <Image src="/riskhound-logo.png" alt="" width={38} height={38} priority />
           </span>
           <span>RiskHound</span>
         </Link>
@@ -52,9 +50,6 @@ export function Nav() {
 
         <div className="rk-nav__right">
           <CommandPalette />
-          <Link href="/api-docs" className="rk-nav__api">
-            API
-          </Link>
           <span className="rk-nav__divider" aria-hidden="true" />
           <ThemeToggle />
           <button
