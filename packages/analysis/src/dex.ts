@@ -27,7 +27,12 @@ export const APEXISWAP = {
 
 const ZERO = "0x0000000000000000000000000000000000000000";
 const DEAD = "0x000000000000000000000000000000000000dead";
-const SIMULATOR = "0x000000000000000000000000000000000000dEaD" as Address;
+/**
+ * The round trip must run from an address the token has no opinion about.
+ * 0x…dEaD is the burn address and is routinely blacklisted, fee-exempted or
+ * special-cased, so simulating from it does not describe an ordinary user.
+ */
+const SIMULATOR = "0x5269736b486f756e6453696d756c61746f720001" as Address;
 const MAX_STORAGE_SLOT_PROBE = 32;
 
 const factoryAbi = parseAbi(["function getPair(address,address) view returns (address)"]);
@@ -78,6 +83,26 @@ async function discoverBalanceSlot(client: PublicClient, token: Address) {
   return null;
 }
 
+/**
+ * A revert proves something about the token. A timeout, a 429 or a dropped
+ * socket proves nothing about it at all. Only positive evidence of a revert
+ * may become a "cannot sell" verdict, so anything unrecognised is treated as
+ * "not tested" rather than as a failed sell.
+ */
+export function isRevert(error: unknown): boolean {
+  const err = error as { code?: unknown; cause?: { code?: unknown }; name?: string };
+  // JSON-RPC error 3 is the standard "execution reverted".
+  if (err?.code === 3 || err?.cause?.code === 3) return true;
+  if (["TimeoutError", "HttpRequestError", "SocketClosedError", "AbortError"].includes(err?.name ?? "")) {
+    return false;
+  }
+  const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
+  if (/timeout|timed out|fetch failed|econn|socket|network|rate limit|too many requests|\b(429|502|503|504)\b/.test(message)) {
+    return false;
+  }
+  return /execution reverted|reverted with|invalid opcode|out of gas/.test(message);
+}
+
 async function executeRoundTrip(client: PublicClient, token: Address, amountIn: bigint) {
   const slotKey = await discoverBalanceSlot(client, APEXISWAP.baseToken);
   if (!slotKey) return { ok: false as const, tested: false, reason: "Base-token balance storage slot could not be resolved safely." };
@@ -103,9 +128,13 @@ async function executeRoundTrip(client: PublicClient, token: Address, amountIn: 
     const lossBps = returned >= amountIn ? 0 : Number(((amountIn - returned) * 10_000n) / amountIn);
     return { ok: true as const, tested: true, bought, returned, lossBps };
   } catch (error) {
+    const reverted = isRevert(error);
     return {
       ok: false as const,
-      tested: true,
+      // A transport failure is not a test of the token, so it must not count
+      // as one. Only a proven revert is evidence about sellability.
+      tested: reverted,
+      reverted,
       reason: error instanceof Error ? error.message : String(error),
     };
   }
@@ -236,7 +265,9 @@ export async function analyzeApexiSwap(opts: {
     : {
         step: "Isolated buy → approve → sell",
         success: false,
-        detail: execution?.tested ? "Round-trip execution reverted." : "Round-trip execution unsupported by RPC/state layout.",
+        detail: execution?.reverted
+          ? "Round-trip execution reverted on the sell leg."
+          : "Round-trip execution could not be completed, so sellability is unproven.",
         error: execution?.reason,
         evidence,
       };
@@ -252,10 +283,10 @@ export async function analyzeApexiSwap(opts: {
     ],
     simulation: {
       canBuy: Boolean(buyQuote),
-      // tested && !ok means the round trip actually ran and the sell reverted.
-      // Collapsing that to null made the honeypot rule in scoring.ts
-      // unreachable, so a proven sell trap was never reported as one.
-      canSell: execution?.ok ? true : execution?.tested ? false : null,
+      // A proven revert is the only thing that may say "cannot sell".
+      // Collapsing it to null made the honeypot rule in scoring.ts
+      // unreachable, so a real sell trap was never reported as one.
+      canSell: execution?.ok ? true : execution?.reverted ? false : null,
       buyTaxBps: null,
       sellTaxBps: execution?.ok ? execution.lossBps : null,
       steps: [
