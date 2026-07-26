@@ -108,14 +108,16 @@ async function readContractOverRpcUnbounded(address: `0x${string}`) {
     decimals: null as number | null,
     totalSupply: null as string | null,
     owner: null as string | null,
+    error: null as string | null,
     signals: [] as Array<{ severity: "low" | "medium" | "high" | "critical"; name: string; detail: string }>,
   };
 
   const { rpc } = getObservedArcClients();
-  if (!rpc) return empty;
+  if (!rpc) return { ...empty, error: "no rpc configured" };
 
+  // A silent fall back to cache is undebuggable, so the reason travels with it.
   const probe = await probeCode(rpc, address);
-  if (!probe.ok) return empty;
+  if (!probe.ok) return { ...empty, error: probe.error.slice(0, 300) };
 
   const blockNumber = await rpc.getBlockNumber().then((b) => b.toString()).catch(() => null);
   const code = probe.code;
@@ -154,6 +156,7 @@ async function readContractOverRpcUnbounded(address: `0x${string}`) {
     reachable: true,
     hasCode: true,
     blockNumber,
+    error: null,
     bytecodeHash: bytecodeHash(code),
     isProxy: proxy.isProxy,
     proxyReasons: proxy.reasons,
@@ -182,12 +185,16 @@ const UNREACHABLE: RpcRead = {
   decimals: null,
   totalSupply: null,
   owner: null,
+  error: "read exceeded its time budget",
   signals: [],
 };
 
 function readContractOverRpc(address: `0x${string}`) {
   return withBudget(
-    readContractOverRpcUnbounded(address).catch(() => UNREACHABLE),
+    readContractOverRpcUnbounded(address).catch((e) => ({
+      ...UNREACHABLE,
+      error: (e instanceof Error ? e.message : String(e)).slice(0, 300),
+    })),
     UNREACHABLE
   );
 }
@@ -391,6 +398,7 @@ export async function observedMainnetRoutes(app: FastifyInstance) {
           message:
             "This network has no public explorer right now. Contract code and token metadata are read straight from the node; anything that needs an index is not available.",
           rpcBlock: live.blockNumber,
+          rpcError: live.error,
         },
         token: {
           address: stored,

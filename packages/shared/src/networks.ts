@@ -89,7 +89,14 @@ export function loadNetworksFromEnv(env: NodeJS.ProcessEnv = process.env): Recor
       isPaymentNetwork: false,
       isAnalysisNetwork: false,
       nativeCurrency: { name: "USD Coin", symbol: "USDC", decimals: 18 },
+      // thirdweb's keyless endpoint works from a laptop but can be refused
+      // from datacenter ranges, so extra endpoints can be supplied and are
+      // tried in order. A thirdweb client id goes on the path segment.
       rpcUrl: env.OBSERVED_ARC_RPC_URL ?? "https://5042.rpc.thirdweb.com",
+      rpcFallbackUrls: (env.OBSERVED_ARC_RPC_FALLBACK_URLS ?? "")
+        .split(",")
+        .map((u) => u.trim())
+        .filter(Boolean),
       explorerUrl: env.OBSERVED_ARC_EXPLORER_URL ?? "",
       explorerApiUrl: env.OBSERVED_ARC_EXPLORER_URL ? `${env.OBSERVED_ARC_EXPLORER_URL}/api` : "",
       explorerV2Url: env.OBSERVED_ARC_EXPLORER_URL ? `${env.OBSERVED_ARC_EXPLORER_URL}/api/v2` : "",
