@@ -5,16 +5,32 @@ import { Nav } from "@/components/Nav";
 import { THEME_INIT_SCRIPT } from "@/components/ThemeToggle";
 import { StatusBar } from "@/components/StatusBar";
 import { ScrollChrome } from "@/components/ScrollChrome";
+import { siteUrl } from "@/lib/site";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "RiskHound | Token risk intelligence built on Arc",
+  metadataBase: new URL(siteUrl()),
+  title: {
+    default: "RiskHound | Token risk intelligence built on Arc",
+    // Every page title ends up branded without repeating it in each file.
+    template: "%s | RiskHound",
+  },
   description: "Evidence-backed token, creator, holder, liquidity, and bridge risk intelligence built on Arc.",
   icons: { icon: "/riskhound-logo.png", apple: "/riskhound-logo.png" },
   openGraph: {
+    type: "website",
+    siteName: "RiskHound",
+    url: siteUrl(),
     title: "RiskHound | Token risk intelligence built on Arc",
     description: "Inspect token control, exit risk, liquidity, holders, creator history, and bridge evidence.",
   },
+  twitter: {
+    card: "summary_large_image",
+    creator: "@necoweb3",
+    title: "RiskHound | Token risk intelligence built on Arc",
+    description: "Inspect token control, exit risk, liquidity, holders, creator history, and bridge evidence.",
+  },
+  robots: { index: true, follow: true },
 };
 
 // Media-query themeColor keeps the mobile browser chrome in sync with the theme.

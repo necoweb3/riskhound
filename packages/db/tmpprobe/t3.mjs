@@ -1,0 +1,11 @@
+import { PrismaClient } from "@prisma/client";
+const p = new PrismaClient();
+const chain = "arc_observed_5042";
+const all = await p.token.count({ where: { chain } });
+const filtered = await p.token.count({ where: { chain, AND: [{ NOT: { name: { startsWith: "qa_" } } }, { NOT: { symbol: { startsWith: "qa_" } } }] } });
+const nullEither = await p.token.count({ where: { chain, OR: [{ name: null }, { symbol: null }] } });
+const rows = await p.$queryRawUnsafe("SELECT COUNT(*) c FROM Token WHERE chain=? AND ((name LIKE 'qa_%' AND substr(name,3,1)<>'_') OR (symbol LIKE 'qa_%' AND substr(symbol,3,1)<>'_'))", chain);
+const sample = await p.$queryRawUnsafe("SELECT address,name,symbol FROM Token WHERE chain=? AND ((name LIKE 'qa_%' AND substr(name,3,1)<>'_') OR (symbol LIKE 'qa_%' AND substr(symbol,3,1)<>'_')) LIMIT 5", chain);
+console.log({ all, filtered, nullEither, wildcardVictims: rows });
+console.log(sample);
+await p.$disconnect();

@@ -3335,3 +3335,43 @@ pre.mono {
    page below it do not jump once the real values arrive. */
 .rk-statusbar--pending { visibility: hidden; }
 .rk-statusbar--pending::before { content: "\00a0"; display: block; }
+
+
+/* ==========================================================================
+   404 and error boundary
+   ========================================================================== */
+
+.rk-notfound {
+  max-width: 560px;
+  margin: 0 auto;
+  padding: 48px 0 64px;
+  text-align: center;
+}
+.rk-notfound > .rk-eyebrow { display: block; margin-bottom: 12px; }
+.rk-notfound h1 {
+  margin: 0 0 14px;
+  font-size: clamp(1.5rem, 4vw, 2rem);
+  font-weight: 600;
+  letter-spacing: -0.025em;
+}
+.rk-notfound .rk-lead { margin: 0 auto; max-width: 46ch; font-size: 13.5px; }
+.rk-notfound code {
+  font-family: var(--font-mono);
+  font-size: 0.94em;
+  padding: 1px 4px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-xs);
+  background: var(--surface-2);
+}
+.rk-notfound__search { margin: 26px 0 22px; text-align: left; }
+.rk-notfound__links {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px 18px;
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
+  font-size: 13px;
+}
+.rk-notfound__links a { color: var(--text-2); text-decoration: none; }
+.rk-notfound__links a:hover { color: var(--text); }
