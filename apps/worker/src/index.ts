@@ -15,6 +15,15 @@ import { runObservedArcHolderIndexer } from "./observedArcHolderIndexer.js";
 const redisUrl = process.env.REDIS_URL ?? "redis://localhost:6379";
 const redisOptional = process.env.REDIS_OPTIONAL !== "false";
 
+// Empty or unparsable env values turn Number() into 0 or NaN, which would run a
+// poll loop with no delay at all against the RPC and the database.
+const MIN_POLL_MS = 5_000;
+function pollMs(raw: string | undefined, fallback: number) {
+  const parsed = Number(raw);
+  if (!raw?.trim() || !Number.isFinite(parsed)) return fallback;
+  return Math.max(MIN_POLL_MS, parsed);
+}
+
 async function loop(name: string, ms: number, fn: () => Promise<void>) {
   const run = async () => {
     try {
@@ -85,15 +94,23 @@ async function main() {
     worker.on("failed", (job, err) => {
       console.error(`[analysis] failed ${job?.id}`, err.message);
     });
+    // Without an 'error' listener an EventEmitter rethrows, so any Redis-side
+    // error would take the whole worker process down.
+    worker.on("error", (err) => {
+      console.error("[analysis] worker error", err instanceof Error ? err.message : err);
+    });
+    redis.analysisQueue.on("error", (err) => {
+      console.error("[analysis] queue error", err instanceof Error ? err.message : err);
+    });
   }
 
-  const arcPoll = Number(process.env.ARC_INDEXER_POLL_MS ?? 60_000);
-  const rhPoll = Number(process.env.ROBINHOOD_INDEXER_POLL_MS ?? 120_000);
-  const bridgePoll = Number(process.env.BRIDGE_INDEXER_POLL_MS ?? 60_000);
-  const observedMainnetPoll = Number(process.env.OBSERVED_MAINNET_INDEXER_POLL_MS ?? 300_000);
-  const settlementPoll = Number(process.env.BRIDGE_SETTLEMENT_POLL_MS ?? 60_000);
-  const solanaCctpPoll = Number(process.env.SOLANA_CCTP_POLL_MS ?? 120_000);
-  const evmCctpBackfillPoll = Number(process.env.EVM_CCTP_BACKFILL_POLL_MS ?? 300_000);
+  const arcPoll = pollMs(process.env.ARC_INDEXER_POLL_MS, 60_000);
+  const rhPoll = pollMs(process.env.ROBINHOOD_INDEXER_POLL_MS, 120_000);
+  const bridgePoll = pollMs(process.env.BRIDGE_INDEXER_POLL_MS, 60_000);
+  const observedMainnetPoll = pollMs(process.env.OBSERVED_MAINNET_INDEXER_POLL_MS, 300_000);
+  const settlementPoll = pollMs(process.env.BRIDGE_SETTLEMENT_POLL_MS, 60_000);
+  const solanaCctpPoll = pollMs(process.env.SOLANA_CCTP_POLL_MS, 120_000);
+  const evmCctpBackfillPoll = pollMs(process.env.EVM_CCTP_BACKFILL_POLL_MS, 300_000);
 
   await loop("arc-discovery", arcPoll, async () => {
     const found = await runArcDiscovery();
@@ -124,8 +141,16 @@ async function main() {
 
   await loop("analysis-backfill", 60_000, async () => {
     const batchSize = Math.max(1, Math.min(50, Number(process.env.ANALYSIS_BACKFILL_BATCH ?? 20)));
+    // The pending count has to use the same filter as the batch query, or it
+    // reports a backlog the backfill will never pick up and never drains.
     const [pending, analyzed, batch] = await Promise.all([
-      prisma.token.count({ where: { chain: "arc_testnet", analysisUpdatedAt: null } }),
+      prisma.token.count({
+        where: {
+          chain: "arc_testnet",
+          analysisUpdatedAt: null,
+          OR: [{ name: { not: null } }, { symbol: { not: null } }],
+        },
+      }),
       prisma.token.count({ where: { chain: "arc_testnet", analysisUpdatedAt: { not: null } } }),
       prisma.token.findMany({
         where: {
@@ -153,8 +178,16 @@ async function main() {
           }
         ).catch(() => undefined);
       }
-    } else if (batch[0]) {
-      await loadRhAndAnalyze(batch[0].address);
+    } else {
+      // Per token error handling so one token that always fails does not hold
+      // up the rest of the backlog forever.
+      for (const token of batch) {
+        try {
+          await loadRhAndAnalyze(token.address);
+        } catch (e) {
+          console.error("[analysis-backfill]", token.address, e instanceof Error ? e.message : e);
+        }
+      }
     }
     await prisma.dataSourceHealth.upsert({
       where: { key: "analysis_backlog" },
@@ -200,7 +233,7 @@ async function main() {
 
   // Chain 5042 has no explorer, so holders and creators are rebuilt from the
   // node instead. Slow on purpose: it is a backfill, not a live feed.
-  await loop("observed-arc-holders", Number(process.env.OBSERVED_ARC_HOLDER_POLL_MS ?? 120_000), async () => {
+  await loop("observed-arc-holders", pollMs(process.env.OBSERVED_ARC_HOLDER_POLL_MS, 120_000), async () => {
     await runObservedArcHolderIndexer();
   });
 
@@ -225,6 +258,12 @@ async function main() {
     `Workers running (arc discovery, observed mainnet inventory, CCTP sources and settlement, robinhood indexer, alerts${analysisQueue ? ", queue" : ", inline"})`
   );
 }
+
+// Node aborts the process on an unhandled rejection by default, which would
+// take every indexer loop down with whichever background promise rejected.
+process.on("unhandledRejection", (reason) => {
+  console.error("[worker] unhandled rejection", reason instanceof Error ? reason.message : reason);
+});
 
 main().catch((e) => {
   console.error(e);

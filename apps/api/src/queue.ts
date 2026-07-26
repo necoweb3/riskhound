@@ -71,10 +71,14 @@ export async function enqueueAnalysis(address: string, force?: boolean) {
   if (!analysisQueue || !redisAvailable) {
     return { queued: false as const, reason: "redis_unavailable" as const };
   }
+  // BullMQ deduplicates on jobId, so the id is bucketed per minute the way the
+  // worker buckets its own jobs: a burst of requests for one token collapses
+  // into a single analysis while a later refresh can still be queued.
+  const minuteBucket = Math.floor(Date.now() / 60_000);
   await analysisQueue.add(
     "analyze",
     { address: address.toLowerCase(), chain: "arc_testnet", force },
-    { jobId: `analyze-${address.toLowerCase()}-${Date.now()}` }
+    { jobId: `analyze-${address.toLowerCase()}-${minuteBucket}` }
   );
   return { queued: true as const };
 }

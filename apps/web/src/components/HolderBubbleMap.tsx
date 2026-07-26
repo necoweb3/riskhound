@@ -30,12 +30,11 @@ const COLORS = [
 ];
 
 function layoutBubbles(holders: BubbleHolder[], width: number, height: number): Placed[] {
+  // A bubble is a claim about supply share, so only a measured share may size
+  // one. Unknown or below-rounding shares are a gap and stay out of the map.
   const withPct = holders
-    .map((h, i) => ({
-      ...h,
-      pctVal: h.pct != null && h.pct > 0 ? h.pct : Math.max(0.4, 6 - i * 0.35),
-    }))
-    .filter((h) => h.pctVal > 0)
+    .filter((h) => h.pct != null && h.pct > 0)
+    .map((h) => ({ ...h, pctVal: h.pct as number }))
     .slice(0, 18);
 
   if (!withPct.length) return [];
@@ -109,9 +108,9 @@ export function HolderBubbleMap({
   }
 
   const topShare = [...placed]
-    .sort((a, b) => (b.pct ?? b.pctVal) - (a.pct ?? a.pctVal))
+    .sort((a, b) => b.pctVal - a.pctVal)
     .slice(0, 5)
-    .reduce((a, h) => a + (h.pct ?? 0), 0);
+    .reduce((a, h) => a + h.pctVal, 0);
 
   return (
     <div className="rk-bubble">

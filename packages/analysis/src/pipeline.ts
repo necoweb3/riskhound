@@ -69,13 +69,38 @@ export async function analyzeToken(opts: AnalyzeTokenOptions): Promise<AnalyzeTo
     errors.push("Arc explorer unhealthy");
   }
 
-  dataSources.push({
-    key: "arc_rpc",
-    name: "Arc RPC",
-    healthy: Boolean(arc.rpc),
-    usedInThisAnalysis: Boolean(arc.rpc),
-    lastError: arc.rpc ? undefined : "RPC not configured",
-  });
+  // A constructed client object is not a working node. Health has to come from
+  // an answer, otherwise a dead RPC is reported as a healthy source and lifts
+  // the confidence of an analysis that read nothing.
+  if (!arc.rpc) {
+    dataSources.push({
+      key: "arc_rpc",
+      name: "Arc RPC",
+      healthy: false,
+      usedInThisAnalysis: false,
+      lastError: "RPC not configured",
+    });
+  } else {
+    try {
+      await arc.rpc.getBlockNumber();
+      dataSources.push({
+        key: "arc_rpc",
+        name: "Arc RPC",
+        healthy: true,
+        lastSuccessAt: new Date().toISOString(),
+        usedInThisAnalysis: true,
+      });
+    } catch (e) {
+      dataSources.push({
+        key: "arc_rpc",
+        name: "Arc RPC",
+        healthy: false,
+        lastError: e instanceof Error ? e.message : String(e),
+        usedInThisAnalysis: true,
+      });
+      errors.push("Arc RPC unhealthy");
+    }
+  }
 
   const contract = await analyzeContract({
     chain: "arc_testnet",
@@ -91,7 +116,9 @@ export async function analyzeToken(opts: AnalyzeTokenOptions): Promise<AnalyzeTo
     timeline.push({
       id: `deploy-${contract.deployTxHash}`,
       type: "deploy",
-      timestamp: new Date().toISOString(),
+      // Nothing here reads the deploy block time, and the analysis time would
+      // date the deployment to the moment it was looked at.
+      timestamp: null,
       chain: "arc_testnet",
       title: "Token contract deployment",
       txHash: contract.deployTxHash,
@@ -99,14 +126,34 @@ export async function analyzeToken(opts: AnalyzeTokenOptions): Promise<AnalyzeTo
     });
   }
 
-  const dex = await analyzeApexiSwap({
-    chain: "arc_testnet",
-    token: addr,
-    tokenDecimals: contract.decimals,
-    rpc: arc.rpc,
-    explorer: arc.explorer,
-  });
-  const simulation = opts.skipSimulation ? null : dex.simulation;
+  // One failing pair read must not discard a report where every other analyzer
+  // answered. The DEX result becomes a recorded gap instead.
+  let dex: Awaited<ReturnType<typeof analyzeApexiSwap>> | null = null;
+  try {
+    dex = await analyzeApexiSwap({
+      chain: "arc_testnet",
+      token: addr,
+      tokenDecimals: contract.decimals,
+      rpc: arc.rpc,
+      explorer: arc.explorer,
+    });
+  } catch (e) {
+    errors.push(`dex: ${e instanceof Error ? e.message : String(e)}`);
+    allFindings.push({
+      id: `dex-unavailable-${addr}`,
+      category: "data_gaps",
+      name: "DEX pair analysis unavailable",
+      severity: "medium",
+      status: "observed",
+      summary: "The verified DEX lookup did not complete, so pool state and tradability were not read.",
+      whyItMatters: "Untested tradability and unknown LP ownership are gaps, not evidence that the token is tradable.",
+      evidence: [
+        { type: "contract", chain: "arc_testnet", value: addr, label: "Token whose DEX lookup failed" },
+      ],
+      source: "automatic",
+    });
+  }
+  const simulation = opts.skipSimulation ? null : dex?.simulation ?? null;
 
   const holders = await analyzeHolders({
     chain: "arc_testnet",
@@ -124,13 +171,18 @@ export async function analyzeToken(opts: AnalyzeTokenOptions): Promise<AnalyzeTo
     explorer: arc.explorer,
     deployer: contract.deployer,
   });
-  if (dex.pair) {
+  if (dex?.pair) {
     liquidity.snapshot.pools = [dex.pair];
     liquidity.snapshot.dominantController = dex.lpController;
     liquidity.snapshot.dominantPct = dex.lpControllerPct;
     liquidity.snapshot.fakeOrMeaningless = dex.pair.reserve0 === "0" || dex.pair.reserve1 === "0";
     liquidity.snapshot.notes = dex.notes;
-    liquidity.findings = liquidity.findings.filter((f) => f.name !== "Liquidity pool data incomplete");
+    // A pair address alone does not close the gap. Only LP supply and holder
+    // rows that were actually read turn "unknown" into an observation, so a
+    // pair whose LP reads all failed keeps reporting the gap.
+    if (dex.lpDataComplete) {
+      liquidity.findings = liquidity.findings.filter((f) => f.name !== "Liquidity pool data incomplete");
+    }
     if ((dex.lpControllerPct ?? 0) >= 50) {
       liquidity.findings.push({
         id: `lp-control-${dex.pair.address}`,
@@ -230,6 +282,15 @@ export async function analyzeToken(opts: AnalyzeTokenOptions): Promise<AnalyzeTo
       : undefined,
     deployerHistoryLabel: deployerProfile?.historyLabel,
     deployerAddress: contract.deployer,
+    // Completeness reported by the analyzers themselves, so a category is only
+    // called complete when the reads behind it actually answered.
+    analyzerCompleteness: {
+      contract: contract.errors.length === 0 && !contract.sourceUnavailable,
+      buy_sell: simulation?.dataComplete ?? false,
+      liquidity: dex?.lpDataComplete ?? false,
+      holder_concentration: holders.dataComplete,
+      insider_links: holders.holderListComplete,
+    },
   });
 
   const graph = buildFundingGraph({
@@ -281,7 +342,7 @@ export async function analyzeToken(opts: AnalyzeTokenOptions): Promise<AnalyzeTo
     insiderClusters: holders.clusters,
     deployerProfile,
     crossChainLinks: crossLinks,
-    timeline: timeline.sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1)),
+    timeline: timeline.sort(byNewestFirst),
     pools: liquidity.snapshot.pools,
     dataSources,
     explorerUrls: {
@@ -293,4 +354,18 @@ export async function analyzeToken(opts: AnalyzeTokenOptions): Promise<AnalyzeTo
   };
 
   return { detail, report, graph, errors };
+}
+
+/**
+ * Newest first. Equal timestamps must compare equal, otherwise the relative
+ * order of equal events is left to the sort implementation. Events with no
+ * known chain time sort last rather than being placed as if they were oldest.
+ */
+function byNewestFirst(a: TimelineEvent, b: TimelineEvent): number {
+  const at: string | null = a.timestamp ?? null;
+  const bt: string | null = b.timestamp ?? null;
+  if (at === bt) return 0;
+  if (at == null) return 1;
+  if (bt == null) return -1;
+  return at < bt ? 1 : at > bt ? -1 : 0;
 }

@@ -129,32 +129,48 @@ export function buildFundingGraph(opts: {
     });
   }
 
-  // hops to risk: any node that appears in strong/definitive cross-chain risk links
+  // hops to risk: only links that point at a reviewed risk event count. A
+  // definitive same-address link means the wallet exists on another chain,
+  // which is identity, not distance zero from a risk address.
   const riskAddrs = new Set(
     (opts.links ?? [])
-      .filter((l) => l.strength === "definitive" || l.strength === "strong")
-      .flatMap((l) => [l.fromAddress, l.toAddress])
+      .filter(
+        (l) =>
+          l.relatedEventIds.length > 0 &&
+          (l.strength === "definitive" || l.strength === "strong")
+      )
+      .flatMap((l) => [l.fromAddress.toLowerCase(), l.toAddress.toLowerCase()])
   );
 
-  const hopsToRisk = [...nodes.values()]
-    .filter((n) => n.type === "wallet" || n.type === "deployer" || n.type === "funding_wallet")
-    .map((n) => {
-      const addr = n.id.split(":").pop()!;
-      if (riskAddrs.has(addr)) return { address: addr, hops: 0 };
-      // 1-hop if connected by edge to risk addr
-      const connected = edges.some((e) => {
-        const s = e.source.split(":").pop()!;
-        const t = e.target.split(":").pop()!;
-        return (
-          (s === addr && riskAddrs.has(t)) || (t === addr && riskAddrs.has(s))
-        );
-      });
-      return { address: addr, hops: connected ? 1 : null };
+  // Distances must be measured over the edges the caller actually receives,
+  // otherwise a hop is reported through a link that was pruned away.
+  const keptEdges = prioritizeEdges(edges);
+
+  const hopsToRisk: FundingGraph["hopsToRisk"] = [];
+  // The same address can hold a node per chain, and one row per address is the
+  // answer to "how far is this wallet from risk".
+  const seenAddresses = new Set<string>();
+  for (const n of nodes.values()) {
+    if (n.type !== "wallet" && n.type !== "deployer" && n.type !== "funding_wallet") continue;
+    const addr = n.id.split(":").pop()!.toLowerCase();
+    if (seenAddresses.has(addr)) continue;
+    seenAddresses.add(addr);
+    if (riskAddrs.has(addr)) {
+      hopsToRisk.push({ address: addr, hops: 0 });
+      continue;
+    }
+    // 1-hop if connected by a kept edge to a risk addr
+    const connected = keptEdges.some((e) => {
+      const s = e.source.split(":").pop()!.toLowerCase();
+      const t = e.target.split(":").pop()!.toLowerCase();
+      return (s === addr && riskAddrs.has(t)) || (t === addr && riskAddrs.has(s));
     });
+    hopsToRisk.push({ address: addr, hops: connected ? 1 : null });
+  }
 
   return {
     nodes: [...nodes.values()],
-    edges: prioritizeEdges(edges),
+    edges: keptEdges,
     hopsToRisk,
     pruned: true,
     note: "Graph is pruned to highest-signal links (deploy, funding, top holders, cross-chain).",

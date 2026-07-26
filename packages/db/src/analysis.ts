@@ -96,11 +96,33 @@ export type AnalysisResultLike = {
   graph: Parameters<typeof persistEvidenceGraph>[0];
 };
 
+// Two runs for the same token interleaving their delete-then-insert steps can
+// leave duplicated or missing child rows, so writes are queued per token. This
+// covers one process only: the API and the worker are separate processes and
+// still rely on the queue keying analysis jobs by token address.
+const tokenWrites = new Map<string, Promise<unknown>>();
+
 /**
  * Single writer for an analysis result. The worker and the paid API both call
  * this, so a token's stored record does not depend on which path analysed it.
  */
-export async function persistAnalysisResult(result: AnalysisResultLike) {
+export function persistAnalysisResult(result: AnalysisResultLike) {
+  const key = `${result.detail.chain}:${result.detail.address}`.toLowerCase();
+  const previous = tokenWrites.get(key) ?? Promise.resolve();
+  const run = previous.then(() => writeAnalysisResult(result));
+  // The queued tail swallows rejection so one failed run does not fail the next.
+  const settled = run.then(
+    () => undefined,
+    () => undefined
+  );
+  tokenWrites.set(key, settled);
+  void settled.then(() => {
+    if (tokenWrites.get(key) === settled) tokenWrites.delete(key);
+  });
+  return run;
+}
+
+async function writeAnalysisResult(result: AnalysisResultLike) {
   const d = result.detail;
   const existing = await prisma.token.findUnique({
     where: { chain_address: { chain: d.chain, address: d.address } },
@@ -168,10 +190,46 @@ export async function persistAnalysisResult(result: AnalysisResultLike) {
   // Delete and insert must land together, otherwise a failed insert leaves the
   // token with no findings at all.
   await prisma.$transaction(async (tx) => {
-    await tx.finding.deleteMany({ where: { tokenId: token.id, source: "automatic" } });
-    if (merged.size) {
+    // An admin override keeps source "automatic" and only sets the manual*
+    // columns, so deleting by source alone threw away every reviewed decision
+    // on each re-analysis. Reviewed rows survive and are refreshed in place so
+    // the reviewer's row stays the only one for that finding.
+    const reviewed = await tx.finding.findMany({
+      where: { tokenId: token.id, source: "automatic", manualAt: { not: null } },
+      select: { id: true, category: true, name: true, controllerAddress: true },
+    });
+    const key = (f: { category: string; name: string; controllerAddress?: string | null }) =>
+      `${f.category}::${f.name}::${f.controllerAddress ?? ""}`;
+    const reviewedIds = new Map(reviewed.map((f) => [key(f), f.id]));
+    await tx.finding.deleteMany({
+      where: { tokenId: token.id, source: "automatic", manualAt: null },
+    });
+    const fresh: Finding[] = [];
+    for (const f of merged.values()) {
+      const reviewedId = reviewedIds.get(key(f));
+      if (!reviewedId) {
+        fresh.push(f);
+        continue;
+      }
+      // Severity and summary for several findings scale with the measured
+      // value, so discarding the fresh detection would pin a reviewed row to
+      // the numbers it carried at review time and hide any later escalation.
+      // The manual* columns are untouched, so the decision itself survives.
+      await tx.finding.update({
+        where: { id: reviewedId },
+        data: {
+          severity: f.severity,
+          status: f.status,
+          summary: f.summary,
+          whyItMatters: f.whyItMatters,
+          relatedFunction: f.relatedFunction,
+          evidenceJson: jstr(f.evidence),
+        },
+      });
+    }
+    if (fresh.length) {
       await tx.finding.createMany({
-        data: [...merged.values()].map((f) => ({
+        data: fresh.map((f) => ({
           tokenId: token.id,
           chain: d.chain,
           category: f.category,

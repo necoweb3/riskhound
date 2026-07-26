@@ -55,6 +55,12 @@ export function buildRiskReport(opts: {
   };
   deployerHistoryLabel?: "limited_history" | "established" | "unknown";
   deployerAddress?: string | null;
+  /**
+   * Completeness as reported by the analyzer that owns each category. A
+   * category with no entry keeps the previous default of complete, so only an
+   * analyzer that knows it fell short can lower it.
+   */
+  analyzerCompleteness?: Partial<Record<RiskCategoryKey, boolean>>;
 }): RiskReport {
   const findings = [...opts.findings];
   const chain = opts.chain ?? "arc_testnet";
@@ -111,7 +117,35 @@ export function buildRiskReport(opts: {
     });
   }
 
+  // An unread wallet history used to surface as "limited history". It is now
+  // correctly labelled unknown, and without this it would leave the deployer
+  // category empty, which reads as a clean history rather than an unread one.
+  if (opts.deployerHistoryLabel === "unknown") {
+    findings.push({
+      id: "deployer-history-unknown",
+      category: "data_gaps",
+      name: "Deployer history could not be read",
+      severity: "low",
+      status: "observed",
+      summary: "The deployer wallet's transaction list was truncated or unavailable, so its age is unknown.",
+      whyItMatters:
+        "An unread history is not a clean history. Wallet age could not be established in either direction.",
+      evidence: opts.deployerAddress
+        ? [{ type: "address", chain, value: opts.deployerAddress, label: "Deployer wallet" }]
+        : tokenRef("Analysed contract"),
+      source: "automatic",
+    });
+  }
+
   const checked = findings.map(requireEvidence);
+
+  // Completeness comes from the analyzers, not from reading finding names: a
+  // gap is filed under data_gaps, so the category it came from never carried
+  // the word, and a renamed finding silently flipped a category to complete.
+  const completeness: Partial<Record<RiskCategoryKey, boolean>> = {
+    ...(opts.buySellFindingHints ? { buy_sell: opts.buySellFindingHints.dataComplete } : {}),
+    ...opts.analyzerCompleteness,
+  };
 
   const categories: CategoryScore[] = ALL_CATEGORIES.map((category) => {
     const cf = checked.filter((f) => f.category === category);
@@ -121,10 +155,8 @@ export function buildRiskReport(opts: {
       label: CATEGORY_LABELS[category],
       findings: cf,
       // data_gaps is the record of what is missing, so it is complete by
-      // definition. Any other category is incomplete once it reports a gap.
-      dataComplete:
-        category === "data_gaps" ||
-        !cf.some((f) => f.name.toLowerCase().includes("incomplete") || f.status === "theoretical"),
+      // definition.
+      dataComplete: category === "data_gaps" || (completeness[category] ?? true),
       explanation:
         cf.length === 0
           ? "No signals in this category from available data."

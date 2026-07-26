@@ -53,6 +53,16 @@ function ev(
   return { type, chain, value, label, url };
 }
 
+/**
+ * Explorers report decimals as a string and occasionally omit or garble it.
+ * NaN would then flow into every amount formatted downstream, so an
+ * unreadable value stays null.
+ */
+function parseDecimals(value: unknown): number | null {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
 const SELECTOR_RISKS: Record<
   string,
   { name: string; severity: RiskFinding["severity"]; category: RiskFinding["category"]; why: string; status: RiskFinding["status"] }
@@ -187,7 +197,7 @@ export async function analyzeContract(input: ContractAnalysisInput): Promise<Con
       if (addrInfo.token) {
         name = addrInfo.token.name ?? name;
         symbol = addrInfo.token.symbol ?? symbol;
-        if (addrInfo.token.decimals != null) decimals = Number(addrInfo.token.decimals);
+        if (addrInfo.token.decimals != null) decimals = parseDecimals(addrInfo.token.decimals) ?? decimals;
         totalSupply = addrInfo.token.total_supply ?? totalSupply;
       }
     }
@@ -201,7 +211,7 @@ export async function analyzeContract(input: ContractAnalysisInput): Promise<Con
     if (token) {
       name = token.name ?? name;
       symbol = token.symbol ?? symbol;
-      if (token.decimals != null) decimals = Number(token.decimals);
+      if (token.decimals != null) decimals = parseDecimals(token.decimals) ?? decimals;
       totalSupply = token.total_supply ?? totalSupply;
     }
   } catch (e) {
@@ -377,6 +387,25 @@ export async function analyzeContract(input: ContractAnalysisInput): Promise<Con
       whyItMatters: "Classic owner path appears renounced; other admin roles may still exist.",
       relatedFunction: "owner()",
       evidence: [ev(input.chain, "address", owner, "owner")],
+      source: "automatic",
+    });
+  } else {
+    // An owner that could not be read is unknown, not renounced. Without this
+    // gap the two are indistinguishable downstream.
+    findings.push({
+      id: `owner-unknown-${input.address}`,
+      category: "data_gaps",
+      name: "Owner could not be read",
+      severity: "medium",
+      status: "observed",
+      summary: input.rpc
+        ? "owner() returned no address. The contract may not expose owner(), or the node did not answer."
+        : "RPC was unavailable, so owner() was never called.",
+      whyItMatters:
+        "An unreadable owner must not be read as a renounced one. Other admin roles may still control this token.",
+      evidence: [
+        ev(input.chain, "contract", input.address, "owner() target", `${input.explorerUrl}/address/${input.address}`),
+      ],
       source: "automatic",
     });
   }

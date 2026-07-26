@@ -50,6 +50,9 @@ model Token {
 
   @@unique([chain, address])
   @@index([chain, deployTimestamp])
+  // The token feed, /stats and the worker backfill all filter by chain and then
+  // sort or filter on analysisUpdatedAt.
+  @@index([chain, analysisUpdatedAt])
   @@index([overallRisk])
   @@index([deployer])
 }
@@ -333,7 +336,6 @@ model DataSourceHealth {
   lastSuccessAt DateTime?
   lastError     String?
   lastBlock     BigInt?
-  lagBlocks     Int?
   metaJson      String?
   updatedAt     DateTime @updatedAt
 }
@@ -380,7 +382,7 @@ model BridgeTransferRow {
   status                   String
   statusDetail             String?
   sourceExplorerUrl        String
-  recipientArcExplorerUrl  String
+  recipientArcExplorerUrl  String?
   observedAt               DateTime
   firstIndexedAt           DateTime @default(now())
   lastCheckedAt            DateTime @updatedAt

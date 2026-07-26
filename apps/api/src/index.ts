@@ -1,6 +1,7 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import rateLimit from "@fastify/rate-limit";
+import { ZodError } from "zod";
 import { config, validateProductionConfig } from "./config.js";
 import { initQueues, isRedisUp } from "./queue.js";
 import { tokenRoutes } from "./routes/tokens.js";
@@ -77,16 +78,29 @@ async function main() {
 
   app.setErrorHandler((err, _req, reply) => {
     app.log.error(err);
+    // A rejected schema is a malformed request, not a server fault.
+    if (err instanceof ZodError || (err as { name?: string }).name === "ZodError") {
+      const issues = err instanceof ZodError ? err.issues : [];
+      return reply.code(400).send({
+        error: "invalid_request",
+        message: "Request validation failed",
+        issues: issues.map((issue) => ({ path: issue.path.join("."), message: issue.message })),
+      });
+    }
     const status = (err as { statusCode?: number }).statusCode ?? 500;
-    const message =
-      err instanceof Error
-        ? err.message
-        : typeof err === "string"
-          ? err
-          : "Unexpected error";
-    reply.code(status).send({
+    // Internal failures carry driver, filesystem and config detail, so only
+    // client errors get the original text back.
+    if (status >= 500) {
+      return reply.code(status).send({ error: "internal_error", message: "Unexpected error" });
+    }
+    return reply.code(status).send({
       error: err instanceof Error ? err.name : "error",
-      message,
+      message:
+        err instanceof Error
+          ? err.message
+          : typeof err === "string"
+            ? err
+            : "Request failed",
     });
   });
 

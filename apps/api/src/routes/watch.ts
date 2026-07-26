@@ -4,6 +4,10 @@ import { prisma, jparse } from "@rugkiller/db";
 import { normalizeAddress } from "@rugkiller/chain";
 import { authenticatedAddress } from "../services/auth.js";
 
+/** Only chains RiskHound actually indexes can be watched. */
+const WATCHABLE_CHAINS = ["arc_testnet", "arc_observed_5042", "robinhood"] as const;
+const MAX_WATCHLIST_ITEMS = 200;
+
 async function ensureUser(wallet: string) {
   return prisma.user.upsert({
     where: { walletAddress: wallet.toLowerCase() },
@@ -19,11 +23,16 @@ export async function watchRoutes(app: FastifyInstance) {
       return reply.code(401).send({ error: "wallet_required", message: "Provide X-Wallet-Address header" });
     }
     const user = await ensureUser(wallet);
-    const items = await prisma.watchlistItem.findMany({
-      where: { userId: user.id },
-      orderBy: { createdAt: "desc" },
-    });
-    return { items };
+    // Capped listing, so the count says how much of the watchlist is shown.
+    const [items, total] = await Promise.all([
+      prisma.watchlistItem.findMany({
+        where: { userId: user.id },
+        orderBy: { createdAt: "desc" },
+        take: MAX_WATCHLIST_ITEMS,
+      }),
+      prisma.watchlistItem.count({ where: { userId: user.id } }),
+    ]);
+    return { items, total };
   });
 
   app.post("/watchlist", async (req, reply) => {
@@ -34,8 +43,8 @@ export async function watchRoutes(app: FastifyInstance) {
     const body = z
       .object({
         entityType: z.enum(["token", "wallet"]),
-        chain: z.string().default("arc_testnet"),
-        address: z.string(),
+        chain: z.enum(WATCHABLE_CHAINS).default("arc_testnet"),
+        address: z.string().min(1).max(128),
       })
       .parse(req.body);
     const addr = normalizeAddress(body.address);

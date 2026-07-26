@@ -1,16 +1,24 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { shortAddr } from "@/lib/api";
 
 export function CopyAddress({ address }: { address: string }) {
   const [ok, setOk] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Clear on unmount, and on a second copy, so the timer cannot fire into a
+  // node that is gone or reset a fresh confirmation early.
+  useEffect(() => () => {
+    if (timer.current) clearTimeout(timer.current);
+  }, []);
 
   async function copy() {
     try {
       await navigator.clipboard.writeText(address);
       setOk(true);
-      setTimeout(() => setOk(false), 1400);
+      if (timer.current) clearTimeout(timer.current);
+      timer.current = setTimeout(() => setOk(false), 1400);
     } catch {
       /* ignore */
     }

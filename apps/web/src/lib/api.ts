@@ -71,6 +71,8 @@ export type TokenSummary = {
 export function riskLabel(r: string | null | undefined) {
   const map: Record<string, string> = {
     low_detected_risk: "Lower risk",
+    // Observed-chain assessments use their own level name for the same idea.
+    lower_observed_risk: "Lower risk",
     caution: "Caution",
     high_risk: "High risk",
     critical_risk: "Critical",
@@ -88,6 +90,7 @@ export function riskClass(r: string | null | undefined) {
     case "caution":
       return "rk-badge rk-badge--caution";
     case "low_detected_risk":
+    case "lower_observed_risk":
       return "rk-badge rk-badge--ok";
     default:
       return "rk-badge rk-badge--muted";

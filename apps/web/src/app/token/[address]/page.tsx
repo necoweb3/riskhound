@@ -111,15 +111,19 @@ async function loadToken(addr: string): Promise<{ data?: TokenPayload; err?: str
   try {
     const cached = await apiGet<TokenPayload & { summary: TokenPayload["summary"] & { address: string } }>(`/tokens/${addr}`);
 
+    // A stale cache must not make every visitor wait on a full re-analysis, so
+    // the refresh is queued and the stored report is rendered straight away.
+    let queued = false;
     if (cached.stale) {
       try {
         const res = await fetch(`${getApiUrl()}/tokens/${addr}/analyze`, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ force: true }),
+          body: JSON.stringify({ async: true, force: true }),
           cache: "no-store",
+          signal: AbortSignal.timeout(4000),
         });
-        if (res.ok) return { data: fromLive(await res.json()) };
+        queued = res.ok && ((await res.json()) as { queued?: boolean }).queued === true;
       } catch {
         /* keep cache */
       }
@@ -134,7 +138,7 @@ async function loadToken(addr: string): Promise<{ data?: TokenPayload; err?: str
         simulation: cached.simulation,
         stale: cached.stale,
         analysisUpdatedAt: cached.analysisUpdatedAt,
-        analysisPending: cached.analysisPending,
+        analysisPending: cached.analysisPending || queued,
         explorerAddress: `https://testnet.arcscan.app/address/${addr}`,
       },
     };
@@ -194,14 +198,24 @@ export default async function TokenPage({ params }: { params: Promise<{ address:
   const liq = formatLiquidity(summary.liquidityUsd ?? null);
   const steps = Array.isArray(simulation?.steps) ? simulation!.steps! : [];
 
-  const categories = (report?.categories ?? [])
-    .filter((c) => c.category !== "data_gaps" || c.score > 0)
-    .slice(0, 8);
+  // Every category is listed, otherwise a fixed order silently hides the last
+  // ones. An empty data_gaps row says nothing, so it is the only one dropped.
+  const categories = (report?.categories ?? []).filter((c) => c.category !== "data_gaps" || c.score > 0);
 
   // Headline number is the worst category score, never an invented average.
-  const score = categories.length ? Math.max(...categories.map((c) => c.score)) : 0;
+  // data_gaps is what is missing rather than something observed, so it is left
+  // out here exactly as aggregateOverall leaves it out of the overall level.
+  // With the gaps excluded an unreadable token scores 0, so a report that
+  // already declares the data insufficient stays unscored instead of showing a
+  // number that reads as safety.
+  const scored = (report?.categories ?? []).filter((c) => c.category !== "data_gaps");
+  const score =
+    scored.length && report?.overall !== "insufficient_data"
+      ? Math.max(...scored.map((c) => c.score))
+      : null;
   const tone = riskTone(report?.overall);
-  const offset = Math.round(ARC_LEN * (1 - Math.min(100, Math.max(0, score)) / 100) * 10) / 10;
+  const offset =
+    score == null ? ARC_LEN : Math.round(ARC_LEN * (1 - Math.min(100, Math.max(0, score)) / 100) * 10) / 10;
 
   const sellLabel = simulation?.canSell === false ? "Reverted" : simulation?.canSell === true ? "Open" : "Unclear";
   const buyLabel = simulation?.canBuy === true ? "Open" : simulation?.canBuy === false ? "Failed" : "Unclear";
@@ -221,7 +235,13 @@ export default async function TokenPage({ params }: { params: Promise<{ address:
   const tracked = ranked.slice(0, 12);
   const rest = Math.max(0, 100 - tracked.reduce((a, h) => a + (h.pct ?? 0), 0));
 
-  const topFindings = (report?.topFindings?.length ? report.topFindings : findings).slice(0, 10);
+  // topFindings is already capped by the API, so the count has to come from the
+  // category breakdown or the page under-reports what was actually found.
+  const findingSource = report?.topFindings?.length ? report.topFindings : findings;
+  const findingCount = report?.categories?.length
+    ? report.categories.reduce((n, c) => n + (c.findings ?? []).length, 0)
+    : findingSource.length;
+  const topFindings = findingSource.slice(0, 10);
   const creatorWarnings = (report?.topFindings ?? findings).filter((f) => f.category === "cross_chain");
 
   return (
@@ -246,7 +266,7 @@ export default async function TokenPage({ params }: { params: Promise<{ address:
             <CopyAddress address={summary.address ?? addr} />
             {!summary.isVerified && <span className="rk-chip">Unverified source</span>}
             {summary.isProxy && <span className="rk-chip">Upgradeable proxy</span>}
-            {data.stale && <span className="rk-chip">Refreshing</span>}
+            {data.stale && !data.analysisPending && <span className="rk-chip">Result may be out of date</span>}
             {data.analysisPending && <span className="rk-chip">Analysis queued</span>}
           </div>
         </div>
@@ -272,18 +292,26 @@ export default async function TokenPage({ params }: { params: Promise<{ address:
             <span className="rk-dial-big">
               <svg viewBox="0 0 132 132" width="118" height="118" fill="none" aria-hidden="true">
                 <path d={DIAL_PATH} stroke="var(--surface-3)" strokeWidth="8" strokeLinecap="round" />
+                {/* Dash values are inline so the ring still shows the real score
+                    where the draw animation never runs (no scroll timeline,
+                    reduced motion). */}
                 <path
                   className="rk-reveal rk-reveal--draw"
                   d={DIAL_PATH}
                   stroke={tone}
                   strokeWidth="8"
                   strokeLinecap="round"
-                  style={{ ["--len" as string]: String(ARC_LEN), ["--off" as string]: String(offset) }}
+                  style={{
+                    strokeDasharray: ARC_LEN,
+                    strokeDashoffset: offset,
+                    ["--len" as string]: String(ARC_LEN),
+                    ["--off" as string]: String(offset),
+                  }}
                 />
               </svg>
               <span>
-                <b style={{ color: tone }}>{score}</b>
-                <em>of 100</em>
+                <b style={{ color: score == null ? "var(--text-3)" : tone }}>{score ?? "--"}</b>
+                <em>{score == null ? "not scored" : "of 100"}</em>
               </span>
             </span>
             <span style={{ minWidth: 0 }}>
@@ -300,7 +328,7 @@ export default async function TokenPage({ params }: { params: Promise<{ address:
 
           <div className="rk-verdict__meta">
             <div><span>Confidence</span><span style={{ fontWeight: 550, textTransform: "capitalize" }}>{report?.confidence ?? "Unknown"}</span></div>
-            <div><span>Findings</span><span className="rk-mono">{topFindings.length}</span></div>
+            <div><span>Findings</span><span className="rk-mono">{findingCount}</span></div>
             <div><span>Overall</span><span style={{ fontWeight: 550 }}>{riskLabel(report?.overall)}</span></div>
           </div>
         </div>
@@ -363,7 +391,9 @@ export default async function TokenPage({ params }: { params: Promise<{ address:
         <Reveal as="section" className="rk-panel">
           <div className="rk-panel-head">
             <span>Findings</span>
-            <span style={{ color: "var(--text-4)" }}>{topFindings.length} with evidence</span>
+            <span style={{ color: "var(--text-4)" }}>
+              {findingCount > topFindings.length ? `${topFindings.length} of ${findingCount} shown` : `${findingCount} recorded`}
+            </span>
           </div>
           {topFindings.map((f, i) => {
             const proof = (Array.isArray(f.evidence) ? f.evidence : f.evidenceJson) ?? [];

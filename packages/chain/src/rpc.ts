@@ -163,12 +163,23 @@ export function bytecodeHash(code: Hex): string {
   return keccak256(code);
 }
 
+/** True when `needle` occurs in `hex` starting on a whole byte (even offset). */
+function includesAtByteBoundary(hex: string, needle: string): boolean {
+  for (let i = hex.indexOf(needle); i !== -1; i = hex.indexOf(needle, i + 1)) {
+    if (i % 2 === 0) return true;
+  }
+  return false;
+}
+
 export function scanSelectors(code: Hex): { selector: string; signature: string }[] {
   const hex = code.slice(2).toLowerCase();
   const found: { selector: string; signature: string }[] = [];
   for (const [sel, sig] of Object.entries(RISK_SELECTORS)) {
-    // PUSH4 selector patterns commonly appear as 63XXXXXXXX or in jump tables
-    if (hex.includes(sel)) {
+    // A dispatcher can only route to a selector it pushes, so require the
+    // PUSH4 opcode (0x63) immediately before it and require the match to land
+    // on a byte boundary. A bare substring search also hits constants, address
+    // literals and metadata, which invented mint and blacklist authorities.
+    if (includesAtByteBoundary(hex, `63${sel}`)) {
       found.push({ selector: sel, signature: sig });
     }
   }
@@ -189,7 +200,7 @@ export function detectProxyHints(code: Hex): {
     reasons.push("upgradeTo / upgradeToAndCall selector present");
   }
   // minimal proxy (EIP-1167) prefix
-  if (hex.startsWith("363d3d373d3d3d363d73") || hex.includes("363d3d373d3d3d363d73")) {
+  if (hex.includes("363d3d373d3d3d363d73")) {
     reasons.push("EIP-1167 minimal proxy pattern");
   }
   return { isProxy: reasons.length > 0, reasons };

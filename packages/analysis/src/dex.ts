@@ -140,6 +140,22 @@ async function executeRoundTrip(client: PublicClient, token: Address, amountIn: 
   }
 }
 
+/**
+ * Explorer amounts arrive as strings and are sometimes absent or non-numeric.
+ * An unparseable amount is unknown, and a bare BigInt() would throw and take
+ * the whole token analysis down with it.
+ */
+function toBigInt(value: unknown): bigint | null {
+  if (typeof value === "bigint") return value;
+  if (typeof value === "number") return Number.isInteger(value) ? BigInt(value) : null;
+  if (typeof value !== "string" || value.trim() === "") return null;
+  try {
+    return BigInt(value);
+  } catch {
+    return null;
+  }
+}
+
 export async function analyzeApexiSwap(opts: {
   token: Address;
   tokenDecimals: number | null;
@@ -151,6 +167,8 @@ export async function analyzeApexiSwap(opts: {
   simulation: SimulationResult;
   lpController: string | null;
   lpControllerPct: number | null;
+  /** True only when LP supply and LP holder rows were actually read. */
+  lpDataComplete: boolean;
   notes: string[];
 }> {
   const now = new Date().toISOString();
@@ -159,6 +177,7 @@ export async function analyzeApexiSwap(opts: {
       pair: null,
       lpController: null,
       lpControllerPct: null,
+      lpDataComplete: false,
       notes: ["Arc RPC unavailable; verified DEX lookup was not run."],
       simulation: {
         canBuy: null,
@@ -174,18 +193,56 @@ export async function analyzeApexiSwap(opts: {
     };
   }
 
-  const pairAddress = (await opts.rpc.readContract({
-    address: APEXISWAP.factory,
-    abi: factoryAbi,
-    functionName: "getPair",
-    args: [opts.token, APEXISWAP.baseToken],
-  }).catch(() => ZERO)) as Address;
+  // A factory that did not answer has told us nothing about this token. Folding
+  // that failure into the zero address turned a network error into the claim
+  // "no verified pair exists".
+  const pairLookup = await opts.rpc
+    .readContract({
+      address: APEXISWAP.factory,
+      abi: factoryAbi,
+      functionName: "getPair",
+      args: [opts.token, APEXISWAP.baseToken],
+    })
+    .then((value) => ({ ok: true as const, value: value as Address }))
+    .catch((e) => ({ ok: false as const, error: e instanceof Error ? e.message : String(e) }));
+
+  if (!pairLookup.ok) {
+    return {
+      pair: null,
+      lpController: null,
+      lpControllerPct: null,
+      lpDataComplete: false,
+      notes: ["Verified APEXISWAP factory did not answer; pair existence is unknown."],
+      simulation: {
+        canBuy: null,
+        canSell: null,
+        buyTaxBps: null,
+        sellTaxBps: null,
+        steps: [
+          {
+            step: "Factory pair lookup",
+            success: false,
+            detail: "The verified factory call failed, so it is unknown whether a WUSDC pair exists.",
+            error: pairLookup.error,
+            evidence: [{ type: "contract", chain: opts.chain, value: APEXISWAP.factory }],
+          },
+        ],
+        summary: "Verified factory lookup failed; tradability is unknown.",
+        simulatedAt: now,
+        method: "eth_call",
+        dataComplete: false,
+      },
+    };
+  }
+
+  const pairAddress = pairLookup.value;
 
   if (pairAddress.toLowerCase() === ZERO) {
     return {
       pair: null,
       lpController: null,
       lpControllerPct: null,
+      lpDataComplete: false,
       notes: ["Verified APEXISWAP factory returned no WUSDC pair."],
       simulation: {
         canBuy: null,
@@ -201,11 +258,49 @@ export async function analyzeApexiSwap(opts: {
     };
   }
 
+  // One unanswered pair read must not discard the rest of the token analysis,
+  // so pool state that could not be read is reported as unknown instead.
   const [token0, token1, reserves] = await Promise.all([
-    opts.rpc.readContract({ address: pairAddress, abi: pairAbi, functionName: "token0" }),
-    opts.rpc.readContract({ address: pairAddress, abi: pairAbi, functionName: "token1" }),
-    opts.rpc.readContract({ address: pairAddress, abi: pairAbi, functionName: "getReserves" }),
+    opts.rpc.readContract({ address: pairAddress, abi: pairAbi, functionName: "token0" }).catch(() => null),
+    opts.rpc.readContract({ address: pairAddress, abi: pairAbi, functionName: "token1" }).catch(() => null),
+    opts.rpc.readContract({ address: pairAddress, abi: pairAbi, functionName: "getReserves" }).catch(() => null),
   ]);
+
+  if (!token0 || !token1 || !reserves) {
+    const pairEvidence: EvidenceRef[] = [
+      { type: "contract", chain: opts.chain, value: pairAddress, label: APEXISWAP.name },
+    ];
+    return {
+      pair: null,
+      lpController: null,
+      lpControllerPct: null,
+      lpDataComplete: false,
+      notes: [
+        `Verified ${APEXISWAP.name} WUSDC pair ${pairAddress} was found, but its token and reserve reads did not answer.`,
+      ],
+      simulation: {
+        canBuy: null,
+        canSell: null,
+        buyTaxBps: null,
+        sellTaxBps: null,
+        steps: [
+          { step: "Verified factory lookup", success: true, detail: `Pair ${pairAddress}`, evidence: pairEvidence },
+          {
+            step: "Pair state read",
+            success: false,
+            detail: "Pair token and reserve reads failed, so pool state is unknown.",
+            error: "pair_read_failed",
+            evidence: pairEvidence,
+          },
+        ],
+        summary: "A verified pair exists, but its state could not be read; tradability is unknown.",
+        simulatedAt: now,
+        method: "eth_call",
+        dataComplete: false,
+      },
+    };
+  }
+
   const tokenIs0 = token0.toLowerCase() === opts.token.toLowerCase();
   const tokenReserve = tokenIs0 ? reserves[0] : reserves[1];
   const baseReserve = tokenIs0 ? reserves[1] : reserves[0];
@@ -223,23 +318,31 @@ export async function analyzeApexiSwap(opts: {
 
   const [lpToken, lpHolders, lpTransfers] = await Promise.all([
     opts.explorer.getToken(pairAddress).catch(() => null),
-    opts.explorer.getTokenHolders(pairAddress).catch(() => ({ items: [] })),
-    opts.explorer.getTokenTransfers(pairAddress).catch(() => ({ items: [] })),
+    // A failed holder or transfer read is an unknown LP set, not an empty one,
+    // so it stays distinguishable from a page that genuinely came back empty.
+    opts.explorer.getTokenHolders(pairAddress).catch(() => null),
+    opts.explorer.getTokenTransfers(pairAddress).catch(() => null),
   ]);
-  const supply = BigInt(lpToken?.total_supply ?? "0");
-  const holders = (lpHolders.items ?? []).slice(0, 20).map((holder) => {
+  const supply = toBigInt(lpToken?.total_supply);
+  const holders = (lpHolders?.items ?? []).slice(0, 20).flatMap((holder) => {
     const address = (typeof holder.address === "string" ? holder.address : holder.address.hash).toLowerCase();
-    const raw = BigInt(holder.value ?? "0");
-    const pct = supply > 0n ? Number((raw * 1_000_000n) / supply) / 10_000 : undefined;
-    return { address, balance: raw.toString(), pct };
+    const raw = toBigInt(holder.value);
+    // An unreadable balance is unknown, not zero, so the row is left out rather
+    // than counted as an empty holder.
+    if (raw == null) return [];
+    const pct = supply != null && supply > 0n ? Number((raw * 1_000_000n) / supply) / 10_000 : undefined;
+    return [{ address, balance: raw.toString(), pct }];
   });
+  const lpSupplyKnown = supply != null && supply > 0n;
+  const lpHoldersRead = lpHolders != null;
+  const lpDataComplete = lpSupplyKnown && lpHoldersRead && holders.length > 0;
   const burnedPct = holders
     .filter((h) => h.address === ZERO || h.address === DEAD)
     .reduce((sum, h) => sum + (h.pct ?? 0), 0);
   const controller = holders.find((h) => h.address !== ZERO && h.address !== DEAD) ?? null;
   const evidence: EvidenceRef[] = [
     { type: "contract", chain: opts.chain, value: pairAddress, label: APEXISWAP.name },
-    ...(lpTransfers.items ?? []).slice(0, 3).map((t) => ({ type: "tx" as const, chain: opts.chain, value: t.transaction_hash })),
+    ...(lpTransfers?.items ?? []).slice(0, 3).map((t) => ({ type: "tx" as const, chain: opts.chain, value: t.transaction_hash })),
   ];
   const pair: LiquidityPool = {
     address: pairAddress.toLowerCase(),
@@ -252,7 +355,10 @@ export async function analyzeApexiSwap(opts: {
     lpTokenHolders: holders,
     locked: null,
     lockUntil: null,
-    burned: burnedPct >= 90,
+    // The burned share needs both a readable supply and a holder page that
+    // answered. With either missing, "not burned" would be a claim the data
+    // does not support.
+    burned: lpSupplyKnown && lpHoldersRead ? burnedPct >= 90 : null,
   };
 
   const executionStep = execution?.ok
@@ -276,10 +382,17 @@ export async function analyzeApexiSwap(opts: {
     pair,
     lpController: controller?.address ?? null,
     lpControllerPct: controller?.pct ?? null,
+    lpDataComplete,
     notes: [
       `Verified ${APEXISWAP.name} WUSDC pair found.`,
       `Base reserve: ${formatUnits(baseReserve, APEXISWAP.baseDecimals)} WUSDC.`,
-      burnedPct > 0 ? `Approximately ${burnedPct.toFixed(2)}% of LP supply is burned.` : "No burned LP share observed in the returned holder page.",
+      !lpSupplyKnown
+        ? "LP total supply could not be read, so the burned LP share is unknown."
+        : !lpHoldersRead
+          ? "The LP holder list did not answer, so the burned LP share is unknown."
+          : burnedPct > 0
+            ? `Approximately ${burnedPct.toFixed(2)}% of LP supply is burned.`
+            : "No burned LP share observed in the returned holder page.",
     ],
     simulation: {
       canBuy: Boolean(buyQuote),

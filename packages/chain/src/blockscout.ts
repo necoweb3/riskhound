@@ -148,7 +148,13 @@ export class BlockscoutClient {
         `${this.apiUrl}?${qs({ module: "proxy", action: "eth_blockNumber" })}`,
         this.timeoutMs
       );
-      if (data.result) return { number: parseInt(data.result, 16) };
+      // The module API reports failures as a message string in `result`. Those
+      // do not all parse to NaN ("Deprecated" reads as 0xde, "Error! ..." as
+      // 0xe), so the whole value has to be a hex quantity before it may pass as
+      // a head. Anything else is an unreadable explorer, not a block height.
+      const raw = typeof data.result === "string" ? data.result.trim() : "";
+      const height = /^(0x)?[0-9a-f]+$/i.test(raw) ? parseInt(raw, 16) : NaN;
+      if (Number.isFinite(height)) return { number: height };
     } catch {
       return null;
     }
@@ -182,28 +188,27 @@ export class BlockscoutClient {
   async getTokenHolders(address: string, params?: Record<string, unknown> | null) {
     // Blockscout v2 pages by echoing the previous response's next_page_params
     // back as the query string. These were previously accepted and dropped,
-    // so every caller only ever saw page one.
-    const q = qs(
-      Object.fromEntries(
-        Object.entries(params ?? {}).map(([k, v]) => [k, v == null ? null : String(v)])
-      )
-    );
-    const url = `${this.v2Url}/tokens/${address}/holders${q ? `?${q}` : ""}`;
-    try {
-      return await fetchJson<{
-        items: {
-          address: { hash: string } | string;
-          value: string;
-          token?: BsTokenInfo;
-        }[];
-        next_page_params?: Record<string, unknown> | null;
-      }>(url, this.timeoutMs);
-    } catch (e) {
-      if (e instanceof BlockscoutError && (e.status === 404 || e.status === 422)) {
-        return { items: [], next_page_params: null };
-      }
-      throw e;
+    // so every caller only ever saw page one. A null page param has to go back
+    // as the literal "null" like it does in getTokens: dropping the key makes
+    // the explorer serve page one again, which would let getAllTokenHolders
+    // collect the same holders repeatedly and overstate concentration.
+    const search = new URLSearchParams();
+    for (const [key, value] of Object.entries(params ?? {})) {
+      search.set(key, value == null ? "null" : String(value));
     }
+    const q = search.toString();
+    const url = `${this.v2Url}/tokens/${address}/holders${q ? `?${q}` : ""}`;
+    // A holder read that failed is an unknown holder set, not an empty one.
+    // Returning [] here would let concentration analysis treat an explorer
+    // outage as "nobody holds a large share".
+    return fetchJson<{
+      items: {
+        address: { hash: string } | string;
+        value: string;
+        token?: BsTokenInfo;
+      }[];
+      next_page_params?: Record<string, unknown> | null;
+    }>(url, this.timeoutMs);
   }
 
   /**
@@ -229,47 +234,37 @@ export class BlockscoutClient {
     return { items, complete };
   }
 
+  // The v2 transfer endpoints page by echoing next_page_params, not by page
+  // number, so no pagination argument is accepted here rather than accepting
+  // one and dropping it.
   async getTokenTransfers(
-    tokenAddress: string,
-    opts?: { page?: number }
+    tokenAddress: string
   ): Promise<{ items: BsTokenTransfer[]; next_page_params?: unknown }> {
-    try {
-      return await fetchJson(
-        `${this.v2Url}/tokens/${tokenAddress}/transfers`,
-        this.timeoutMs
-      );
-    } catch (e) {
-      if (e instanceof BlockscoutError && e.status === 404) return { items: [] };
-      throw e;
-    }
+    // An explorer that cannot answer for this token has told us nothing about
+    // its transfer history. "No transfers" is a claim we may only make from a
+    // successful response.
+    return fetchJson(
+      `${this.v2Url}/tokens/${tokenAddress}/transfers`,
+      this.timeoutMs
+    );
   }
 
   async getAddressTransactions(
     address: string
   ): Promise<{ items: BsTx[]; next_page_params?: unknown }> {
-    try {
-      return await fetchJson(
-        `${this.v2Url}/addresses/${address}/transactions`,
-        this.timeoutMs
-      );
-    } catch (e) {
-      if (e instanceof BlockscoutError && e.status === 404) return { items: [] };
-      throw e;
-    }
+    return fetchJson(
+      `${this.v2Url}/addresses/${address}/transactions`,
+      this.timeoutMs
+    );
   }
 
   async getAddressTokenTransfers(
     address: string
   ): Promise<{ items: BsTokenTransfer[] }> {
-    try {
-      return await fetchJson(
-        `${this.v2Url}/addresses/${address}/token-transfers`,
-        this.timeoutMs
-      );
-    } catch (e) {
-      if (e instanceof BlockscoutError && e.status === 404) return { items: [] };
-      throw e;
-    }
+    return fetchJson(
+      `${this.v2Url}/addresses/${address}/token-transfers`,
+      this.timeoutMs
+    );
   }
 
   async getTransaction(hash: string): Promise<BsTx | null> {
@@ -308,32 +303,26 @@ export class BlockscoutClient {
       search.set(key, value == null ? "null" : String(value));
     }
     const q = search.toString();
-    try {
-      return await fetchJson<{
-        items: BsTokenInfo[];
-        next_page_params?: Record<string, unknown> | null;
-      }>(`${this.v2Url}/tokens?${q}`, this.timeoutMs);
-    } catch (e) {
-      if (e instanceof BlockscoutError) return { items: [], next_page_params: null };
-      throw e;
-    }
+    // Discovery callers record source health from this call. Swallowing the
+    // error into an empty page would mark a broken explorer healthy and read
+    // downstream as "no tokens exist".
+    return fetchJson<{
+      items: BsTokenInfo[];
+      next_page_params?: Record<string, unknown> | null;
+    }>(`${this.v2Url}/tokens?${q}`, this.timeoutMs);
   }
 
   /** Search */
   async search(query: string) {
-    try {
-      return await fetchJson<{
-        items: {
-          type: string;
-          address?: string;
-          name?: string;
-          symbol?: string;
-          url?: string;
-        }[];
-      }>(`${this.v2Url}/search?${qs({ q: query })}`, this.timeoutMs);
-    } catch {
-      return { items: [] };
-    }
+    return fetchJson<{
+      items: {
+        type: string;
+        address?: string;
+        name?: string;
+        symbol?: string;
+        url?: string;
+      }[];
+    }>(`${this.v2Url}/search?${qs({ q: query })}`, this.timeoutMs);
   }
 
   /** Module API: get contract creation tx */
@@ -342,42 +331,39 @@ export class BlockscoutClient {
     contractCreator: string;
     txHash: string;
   } | null> {
-    try {
-      const data = await fetchJson<{
-        status: string;
-        result?: { contractAddress: string; contractCreator: string; txHash: string }[];
-        message?: string;
-      }>(
-        `${this.apiUrl}?${qs({
-          module: "contract",
-          action: "getcontractcreation",
-          contractaddresses: address,
-        })}`,
-        this.timeoutMs
-      );
-      const row = data.result?.[0];
-      if (!row) return null;
-      return row;
-    } catch {
-      return null;
-    }
+    // Errors propagate: callers record which explorer sources answered, and a
+    // swallowed failure would be filed as "this contract has no known creator".
+    const data = await fetchJson<{
+      status: string;
+      result?: { contractAddress: string; contractCreator: string; txHash: string }[] | string;
+      message?: string;
+    }>(
+      `${this.apiUrl}?${qs({
+        module: "contract",
+        action: "getcontractcreation",
+        contractaddresses: address,
+      })}`,
+      this.timeoutMs
+    );
+    // The module API answers "no data" with a plain string in `result`, which
+    // index 0 would turn into a single character posing as a row.
+    const row = Array.isArray(data.result) ? data.result[0] : undefined;
+    if (!row) return null;
+    return row;
   }
 
   /** Module API: token info */
   async getTokenInfoModule(address: string) {
-    try {
-      const data = await fetchJson<{
-        status: string;
-        result?: Record<string, string> | Record<string, string>[];
-      }>(
-        `${this.apiUrl}?${qs({ module: "token", action: "getToken", contractaddress: address })}`,
-        this.timeoutMs
-      );
-      if (Array.isArray(data.result)) return data.result[0] ?? null;
-      return data.result ?? null;
-    } catch {
-      return null;
-    }
+    const data = await fetchJson<{
+      status: string;
+      result?: Record<string, string> | Record<string, string>[] | string;
+    }>(
+      `${this.apiUrl}?${qs({ module: "token", action: "getToken", contractaddress: address })}`,
+      this.timeoutMs
+    );
+    if (Array.isArray(data.result)) return data.result[0] ?? null;
+    if (typeof data.result !== "object" || data.result === null) return null;
+    return data.result;
   }
 
   addrHash(from: { hash: string } | string | null | undefined): string | null {

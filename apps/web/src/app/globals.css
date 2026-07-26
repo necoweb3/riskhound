@@ -317,6 +317,20 @@ summary:focus-visible {
   background: var(--green);
   animation: rk-pulse 2.6s ease-in-out infinite;
 }
+/* Degraded sources must not borrow the green live dot. */
+.rk-statusbar__down {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-2);
+}
+.rk-statusbar__down::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--red);
+}
 .rk-statusbar__sep {
   color: var(--line-2);
 }
@@ -2574,7 +2588,6 @@ pre.mono {
 
 @keyframes rk-line { 0%,4% { opacity:0; transform:translate3d(0,7px,0); } 11%,80% { opacity:1; transform:none; } 91%,100% { opacity:0; transform:none; } }
 @keyframes rk-scan { 0% { opacity:1; transform:translateY(-120%); } 100% { opacity:1; transform:translateY(340%); } }
-@keyframes rk-dial-loop { 0%,6% { stroke-dashoffset:254.5; } 48%,82% { stroke-dashoffset:56; } 93%,100% { stroke-dashoffset:254.5; } }
 @keyframes rk-verdict { 0%,42% { opacity:0; transform:translate3d(0,5px,0); } 52%,82% { opacity:1; transform:none; } 92%,100% { opacity:0; transform:none; } }
 @keyframes rk-travel { 0% { left:0%; opacity:0; } 10% { opacity:1; } 88% { opacity:1; } 100% { left:100%; opacity:0; } }
 @keyframes rk-pulse-dot { 0%,100% { opacity:1; } 50% { opacity:.3; } }
@@ -2702,11 +2715,7 @@ pre.mono {
 }
 .rk-live__dial { position: relative; width: 58px; height: 58px; flex-shrink: 0; display: block; }
 .rk-live__dial svg { display: block; }
-.rk-live__dial path:last-child {
-  stroke-dasharray: 254.5;
-  stroke-dashoffset: 56;
-  animation: rk-dial-loop 6.4s ease-in-out infinite;
-}
+/* The dial is drawn from the real score, so no rule may pin its dash values. */
 .rk-live__dial span {
   position: absolute;
   inset: 0;
@@ -2716,7 +2725,7 @@ pre.mono {
   font-size: 16px;
   font-weight: 500;
   letter-spacing: -0.03em;
-  color: var(--red);
+  color: var(--text);
   animation: rk-verdict 6.4s ease-in-out infinite;
 }
 .rk-live__verdict { min-width: 0; animation: rk-verdict 6.4s ease-in-out infinite; }
@@ -2725,7 +2734,8 @@ pre.mono {
   font-size: 14px;
   font-weight: 600;
   letter-spacing: -0.016em;
-  color: var(--red);
+  /* Set from the verdict itself. It is not always bad news. */
+  color: inherit;
   margin-bottom: 3px;
 }
 .rk-live__verdict span { display: block; font-size: 12.5px; line-height: 1.45; color: var(--text-2); }
@@ -3195,3 +3205,118 @@ pre.mono {
   opacity: 0.8;
 }
 .rk-cta .rk-btn:not(.rk-btn--primary):hover { background: transparent; opacity: 1; }
+
+
+/* ==========================================================================
+   Policy page: one page for terms, privacy and the disclaimer
+   ========================================================================== */
+
+.rk-policy {
+  display: grid;
+  grid-template-columns: minmax(0, 230px) minmax(0, 1fr);
+  gap: 28px;
+  align-items: start;
+}
+@media (max-width: 860px) { .rk-policy { grid-template-columns: 1fr; gap: 18px; } }
+
+.rk-policy__nav { position: sticky; top: calc(var(--nav) + 20px); display: block; }
+@media (max-width: 860px) { .rk-policy__nav { position: static; } }
+
+.rk-policy__nav > .rk-eyebrow { display: block; margin-bottom: 10px; }
+.rk-policy__nav a {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr);
+  align-items: baseline;
+  gap: 8px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 13.5px;
+  color: var(--text-2);
+  text-decoration: none;
+  transition: color 0.18s var(--ease);
+}
+.rk-policy__nav a:hover { color: var(--text); }
+.rk-policy__n {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.09em;
+  color: var(--text-4);
+}
+
+.rk-policy__never { margin-top: 26px; }
+.rk-policy__never > .rk-eyebrow { display: block; margin-bottom: 10px; }
+.rk-policy__never ul { margin: 0; padding: 0; list-style: none; }
+.rk-policy__never li {
+  position: relative;
+  padding: 5px 0 5px 16px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-3);
+}
+/* A rule, not a bullet: these are guarantees, not a feature list. */
+.rk-policy__never li::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 12px;
+  width: 8px;
+  height: 1px;
+  background: var(--red);
+}
+
+.rk-policy__body {
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.rk-policy__section { border-bottom: 1px solid var(--line); }
+.rk-policy__section:last-of-type { border-bottom: 0; }
+/* Anchored jumps must not slide under the sticky nav. */
+.rk-policy__section { scroll-margin-top: calc(var(--nav) + 16px); }
+
+.rk-policy__head {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+  padding: 20px 22px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+}
+.rk-policy__head h2 {
+  margin: 0 0 4px;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.018em;
+}
+.rk-policy__head p { margin: 0; font-size: 12.5px; line-height: 1.5; color: var(--text-3); }
+.rk-policy__head .rk-policy__n { padding-top: 3px; }
+
+.rk-policy__body dl { margin: 0; padding: 4px 22px 20px; }
+.rk-policy__body dl > div { padding: 16px 0; border-bottom: 1px solid var(--line); }
+.rk-policy__body dl > div:last-child { border-bottom: 0; padding-bottom: 4px; }
+.rk-policy__body dt {
+  margin-bottom: 6px;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.012em;
+}
+.rk-policy__body dd {
+  margin: 0;
+  max-width: 68ch;
+  font-size: 13.5px;
+  line-height: 1.65;
+  color: var(--text-2);
+}
+
+.rk-policy__foot {
+  margin: 0;
+  padding: 16px 22px;
+  border-top: 1px solid var(--line);
+  background: var(--surface-2);
+  font-size: 12.5px;
+  color: var(--text-3);
+}
+.rk-policy__foot a { color: var(--blue); }

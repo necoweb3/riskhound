@@ -4,8 +4,22 @@ import { useEffect, useState } from "react";
 import { getApiUrl } from "@/lib/api";
 import { authHeaders, WalletBar, useWallet } from "@/components/WalletBar";
 
+/** A refused request must read as refused, never as an empty review queue. */
+function failure(status: number) {
+  if (status === 401 || status === 403) {
+    return new Error("Not signed in as an admin. Connect an admin wallet and sign in.");
+  }
+  return new Error(`Admin request failed (${status}).`);
+}
+
+async function adminGet<T>(path: string): Promise<T> {
+  const res = await fetch(`${getApiUrl()}${path}`, { headers: authHeaders() });
+  if (!res.ok) throw failure(res.status);
+  return (await res.json()) as T;
+}
+
 export default function AdminPage() {
-  const { wallet } = useWallet();
+  const { wallet, session } = useWallet();
   const [health, setHealth] = useState<Record<string, unknown> | null>(null);
   const [events, setEvents] = useState<{ id: string; title: string; manualStatus: string }[]>([]);
   const [appeals, setAppeals] = useState<{ id: string; address: string; status: string; explanation: string }[]>([]);
@@ -14,29 +28,26 @@ export default function AdminPage() {
   async function load() {
     setError("");
     try {
-      const h = await fetch(`${getApiUrl()}/admin/health`, {
-        headers: authHeaders(),
-      }).then((r) => r.json());
-      setHealth(h);
-      const ev = await fetch(`${getApiUrl()}/admin/events/review`, {
-        headers: authHeaders(),
-      }).then((r) => r.json());
+      setHealth(await adminGet<Record<string, unknown>>("/admin/health"));
+      const ev = await adminGet<{ items?: { id: string; title: string; manualStatus: string }[] }>("/admin/events/review");
       setEvents(ev.items ?? []);
-      const ap = await fetch(`${getApiUrl()}/admin/appeals`, {
-        headers: authHeaders(),
-      }).then((r) => r.json());
+      const ap = await adminGet<{ items?: { id: string; address: string; status: string; explanation: string }[] }>("/admin/appeals");
       setAppeals(ap.items ?? []);
     } catch (e) {
-      setError(String(e));
+      // Drop whatever was on screen: unreadable is not the same as none.
+      setHealth(null);
+      setEvents([]);
+      setAppeals([]);
+      setError(e instanceof Error ? e.message : String(e));
     }
   }
 
   useEffect(() => {
     void load();
-  }, [wallet]);
+  }, [wallet, session]);
 
   async function reviewEvent(id: string, manualStatus: "confirmed" | "rejected") {
-    await fetch(`${getApiUrl()}/admin/events/${id}/review`, {
+    const res = await fetch(`${getApiUrl()}/admin/events/${id}/review`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -44,6 +55,10 @@ export default function AdminPage() {
       },
       body: JSON.stringify({ manualStatus, reason: `UI review: ${manualStatus}` }),
     });
+    if (!res.ok) {
+      setError(failure(res.status).message);
+      return;
+    }
     void load();
   }
 
@@ -85,7 +100,7 @@ export default function AdminPage() {
             </div>
           </div>
         ))}
-        {!events.length && <p className="muted">Queue empty.</p>}
+        {!events.length && <p className="muted">{error ? "Queue could not be loaded." : "Queue empty."}</p>}
       </section>
 
       <section className="card">
@@ -96,7 +111,7 @@ export default function AdminPage() {
             <p>{a.explanation}</p>
           </div>
         ))}
-        {!appeals.length && <p className="muted">No open appeals.</p>}
+        {!appeals.length && <p className="muted">{error ? "Appeals could not be loaded." : "No open appeals."}</p>}
       </section>
     </div>
   );

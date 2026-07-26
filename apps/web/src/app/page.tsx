@@ -44,6 +44,15 @@ const DIAL = "M27.8 104.2 A54 54 0 1 1 104.2 104.2";
 /** Length of the 270 degree arc above, so the dial can be filled by score. */
 const DIAL_LEN = 2 * Math.PI * 54 * 0.75;
 
+/** The verdict label takes its colour from the verdict, not from the layout. */
+const RISK_TONE: Record<string, string> = {
+  critical_risk: "var(--red)",
+  high_risk: "var(--amber)",
+  caution: "var(--yellow)",
+  low_detected_risk: "var(--green)",
+  insufficient_data: "var(--text-3)",
+};
+
 const TONE: Record<string, string> = {
   green: "var(--green)",
   amber: "var(--amber)",
@@ -57,6 +66,7 @@ type Stats = {
     address: string;
     symbol: string | null;
     score: number | null;
+    overall: string | null;
     overallLabel: string | null;
     headline: string | null;
     rows: { label: string; value: string; tone: string }[];
@@ -148,7 +158,9 @@ export default async function HomePage() {
                 <span>{dialScore ?? "--"}</span>
               </span>
               <span className="rk-live__verdict">
-                <strong>{latest.overallLabel ?? "Not scored"}</strong>
+                <strong style={{ color: RISK_TONE[latest.overall ?? ""] ?? "var(--text)" }}>
+                  {latest.overallLabel ?? "Not scored"}
+                </strong>
                 <span>{latest.headline ?? "No findings recorded for this contract."}</span>
               </span>
             </div>

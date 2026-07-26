@@ -70,7 +70,7 @@ type BridgeTransfer = {
   status: "waiting_for_circle" | "attestation_ready" | "status_unavailable";
   statusDetail: string;
   sourceExplorerUrl: string;
-  recipientArcExplorerUrl: string;
+  recipientArcExplorerUrl: string | null;
   priority: "standard" | "high_value";
 };
 
@@ -98,7 +98,7 @@ type ArcUsdcMint = {
   recipient: string;
   amountUsdc: number;
   classification: "direct_authorized_mint" | "unrecognized_minter";
-  explorerUrl: string;
+  explorerUrl: string | null;
 };
 
 type ArcTokenTransfer = {
@@ -110,14 +110,34 @@ type ArcTokenTransfer = {
   token?: { address_hash?: string; name?: string | null; symbol?: string | null };
 };
 
+/**
+ * Every observed-explorer read goes through here. Chain 5042 has no explorer
+ * right now, so apiV2 is an empty string, and an empty base produced a
+ * relative URL that made fetch throw and took the whole endpoint down with a
+ * 500. A missing explorer is a gap in this response, not a failure of it.
+ */
+async function arcObservedFetch(path: string, timeoutMs: number): Promise<Response | null> {
+  const base = arcObserved().apiV2;
+  if (!base) return null;
+  return fetch(`${base}${path}`, {
+    headers: { accept: "application/json" },
+    signal: AbortSignal.timeout(timeoutMs),
+  }).catch(() => null);
+}
+
+/** Null rather than a relative path, so the UI can hide a dead link. */
+function arcTxUrl(hash: string) {
+  return arcObserved().url ? arcObserved().txUrl(hash) : null;
+}
+function arcAddressUrl(address: string) {
+  return arcObserved().url ? arcObserved().addressUrl(address) : null;
+}
+
 async function arcPositions(address: string) {
   if (!/^0x[0-9a-f]{40}$/.test(address)) return [];
   try {
-    const response = await fetch(`${arcObserved().apiV2}/addresses/${address}/token-balances`, {
-      headers: { accept: "application/json" },
-      signal: AbortSignal.timeout(8_000),
-    });
-    if (!response.ok) return [];
+    const response = await arcObservedFetch(`/addresses/${address}/token-balances`, 8_000);
+    if (!response?.ok) return [];
     const rows = (await response.json()) as ArcTokenBalance[];
     return rows
       .filter((row) => row.token?.address_hash?.toLowerCase() !== ARC_USDC)
@@ -141,17 +161,13 @@ async function arcActivity(address: string) {
   if (!/^0x[0-9a-f]{40}$/.test(address)) return [];
   try {
     const [txResponse, transferResponse] = await Promise.all([
-      fetch(`${arcObserved().apiV2}/addresses/${address}/transactions`, {
-        headers: { accept: "application/json" }, signal: AbortSignal.timeout(8_000),
-      }),
-      fetch(`${arcObserved().apiV2}/addresses/${address}/token-transfers`, {
-        headers: { accept: "application/json" }, signal: AbortSignal.timeout(8_000),
-      }),
+      arcObservedFetch(`/addresses/${address}/transactions`, 8_000),
+      arcObservedFetch(`/addresses/${address}/token-transfers`, 8_000),
     ]);
-    const txs = txResponse.ok
+    const txs = txResponse?.ok
       ? ((await txResponse.json()) as { items?: ArcTransaction[] }).items ?? []
       : [];
-    const transfers = transferResponse.ok
+    const transfers = transferResponse?.ok
       ? ((await transferResponse.json()) as { items?: ArcTokenTransfer[] }).items ?? []
       : [];
     const rows = [
@@ -163,7 +179,7 @@ async function arcActivity(address: string) {
         counterparty: tx.to?.hash?.toLowerCase() ?? null,
         tokenAddress: null as string | null,
         tokenSymbol: null as string | null,
-        explorerUrl: tx.hash ? `${arcObserved().url}/tx/${tx.hash}` : null,
+        explorerUrl: tx.hash ? arcTxUrl(tx.hash) : null,
       })),
       ...transfers.map((transfer) => ({
         txHash: transfer.transaction_hash ?? "",
@@ -177,7 +193,7 @@ async function arcActivity(address: string) {
         tokenAddress: transfer.token?.address_hash?.toLowerCase() ?? null,
         tokenSymbol: transfer.token?.symbol || null,
         explorerUrl: transfer.transaction_hash
-          ? `${arcObserved().url}/tx/${transfer.transaction_hash}`
+          ? arcTxUrl(transfer.transaction_hash)
           : null,
       })),
     ];
@@ -202,10 +218,8 @@ function decodeMintInput(input: string | undefined) {
 
 async function arcUsdcIntelligence() {
   try {
-    const response = await fetch(`${arcObserved().apiV2}/addresses/${ARC_USDC}/transactions?filter=to`, {
-      headers: { accept: "application/json" }, signal: AbortSignal.timeout(12_000),
-    });
-    if (!response.ok) return { mints: [] as ArcUsdcMint[], totalMintedUsdc: 0 };
+    const response = await arcObservedFetch(`/addresses/${ARC_USDC}/transactions?filter=to`, 12_000);
+    if (!response?.ok) return { mints: [] as ArcUsdcMint[], totalMintedUsdc: 0 };
     const body = (await response.json()) as { items?: Array<ArcTransaction & { block?: number }> };
     const mints = (body.items ?? []).flatMap((tx): ArcUsdcMint[] => {
       const decoded = decodeMintInput(tx.raw_input ?? tx.input);
@@ -219,7 +233,7 @@ async function arcUsdcIntelligence() {
         recipient: decoded.recipient,
         amountUsdc: decoded.amountUsdc,
         classification: KNOWN_ARC_MINTERS.has(minter) ? "direct_authorized_mint" : "unrecognized_minter",
-        explorerUrl: `${arcObserved().url}/tx/${tx.hash}`,
+        explorerUrl: arcTxUrl(tx.hash),
       }];
     });
     return { mints, totalMintedUsdc: mints.reduce((sum, mint) => sum + mint.amountUsdc, 0) };
@@ -234,9 +248,7 @@ async function reconciliationAnomalies() {
       fetch(`${IRIS_API}/v2/messages/${probe.sourceDomain}?transactionHash=${probe.sourceTxHash}`, {
         headers: { accept: "application/json" }, signal: AbortSignal.timeout(8_000),
       }).catch(() => null),
-      fetch(`${arcObserved().apiV2}/transactions/${probe.arcTxHash}`, {
-        headers: { accept: "application/json" }, signal: AbortSignal.timeout(8_000),
-      }).catch(() => null),
+      arcObservedFetch(`/transactions/${probe.arcTxHash}`, 8_000).catch(() => null),
     ]);
     const irisBody = iris?.ok ? await iris.json() as { messages?: Array<{ status?: string; attestation?: string | null }> } : null;
     const arcBody = arc?.ok ? await arc.json() as ArcTransaction : null;
@@ -253,12 +265,14 @@ async function reconciliationAnomalies() {
           ? "Source message and Arc settlement are consistent."
           : "Arc settlement has not been independently confirmed.",
       sourceExplorerUrl: `${BASE_BLOCKSCOUT}/tx/${probe.sourceTxHash}`,
-      arcExplorerUrl: `${arcObserved().url}/tx/${probe.arcTxHash}`,
+      arcExplorerUrl: arcTxUrl(probe.arcTxHash),
     };
   }));
 }
 
 let cache: { expiresAt: number; value: Awaited<ReturnType<typeof loadBridgeWatch>> } | null = null;
+/** One refresh fans out around a hundred external calls, so callers share it. */
+let inFlight: Promise<Awaited<ReturnType<typeof loadBridgeWatch>>> | null = null;
 
 function parameter(tx: BaseTransaction, name: string): string | null {
   const value = tx.decoded_input?.parameters?.find((item) => item.name === name)?.value;
@@ -318,7 +332,7 @@ async function circleStatus(txHash: string, sourceDomain: number): Promise<Pick<
 }
 
 async function loadBridgeWatch() {
-  const [sourceResults, routerResponse, arcUsdcResponse, usdcIntelligence, anomalies, tokenStats, liquidityStats] = await Promise.all([
+  const [sourceResults, routerResult, arcUsdcResponse, usdcIntelligence, anomalies, tokenStats, liquidityStats] = await Promise.all([
     Promise.allSettled(CCTP_SOURCES.map(async (source) => {
       const response = await fetch(blockscoutApiUrl(
         source.chainId,
@@ -331,19 +345,25 @@ async function loadBridgeWatch() {
       if (!response.ok) throw new Error(`${source.key} explorer returned ${response.status}`);
       return { source, body: (await response.json()) as { items?: BaseTransaction[] } };
     })),
-    fetch(blockscoutApiUrl(
-      8453,
-      BASE_BLOCKSCOUT,
-      `addresses/${BASE_ARC_ROUTER}/transactions`,
-      { filter: "to" }
-    ), {
-      headers: { accept: "application/json" },
-      signal: AbortSignal.timeout(12_000),
-    }),
-    fetch(`${arcObserved().apiV2}/tokens/${ARC_USDC}`, {
-      headers: { accept: "application/json" },
-      signal: AbortSignal.timeout(12_000),
-    }),
+    // A router outage is a missing slice of the sample, the same as a failed
+    // CCTP source, so it degrades instead of failing the whole endpoint.
+    (async () => {
+      const response = await fetch(blockscoutApiUrl(
+        8453,
+        BASE_BLOCKSCOUT,
+        `addresses/${BASE_ARC_ROUTER}/transactions`,
+        { filter: "to" }
+      ), {
+        headers: { accept: "application/json" },
+        signal: AbortSignal.timeout(12_000),
+      });
+      if (!response.ok) throw new Error(`Base router explorer returned ${response.status}`);
+      return (await response.json()) as { items?: BaseTransaction[] };
+    })().then(
+      (body) => ({ available: true, body }),
+      () => ({ available: false, body: {} as { items?: BaseTransaction[] } })
+    ),
+    arcObservedFetch(`/tokens/${ARC_USDC}`, 12_000),
     arcUsdcIntelligence(),
     reconciliationAnomalies(),
     prisma.token.count({ where: { chain: "arc_observed_5042" } }),
@@ -352,12 +372,9 @@ async function loadBridgeWatch() {
       _count: { liquidityUsd: true }, _sum: { liquidityUsd: true },
     }),
   ]);
-  if (!routerResponse.ok) {
-    throw new Error("Base explorer could not provide bridge activity");
-  }
   const sourceBodies = sourceResults.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
-  const routerBody = (await routerResponse.json()) as { items?: BaseTransaction[] };
-  const arcUsdc = arcUsdcResponse.ok
+  const routerBody = routerResult.body;
+  const arcUsdc = arcUsdcResponse?.ok
     ? ((await arcUsdcResponse.json()) as { total_supply?: string })
     : null;
 
@@ -411,7 +428,7 @@ async function loadBridgeWatch() {
         amountUsdc,
         observedAt: tx.timestamp as string,
         sourceExplorerUrl: `${sourceExplorer}/tx/${hash}`,
-        recipientArcExplorerUrl: `${arcObserved().url}/address/${recipient}`,
+        recipientArcExplorerUrl: arcAddressUrl(recipient),
         priority: amountUsdc >= 100 ? "high_value" : "standard",
         ...state,
       };
@@ -472,7 +489,7 @@ async function loadBridgeWatch() {
     [...highValueByRecipient.entries()].slice(0, 10).map(async ([address, summary]) => ({
       address,
       ...summary,
-      arcExplorerUrl: `${arcObserved().url}/address/${address}`,
+      arcExplorerUrl: arcAddressUrl(address),
       ...(await Promise.all([arcPositions(address), arcActivity(address)]).then(([positions, activity]) => ({
         positions,
         activity,
@@ -496,7 +513,7 @@ async function loadBridgeWatch() {
         ...summary,
         label: "High-value system mint recipient",
         disclosure: "Receiving an authorized mint is not evidence of wrongdoing.",
-        arcExplorerUrl: `${arcObserved().url}/address/${address}`,
+        arcExplorerUrl: arcAddressUrl(address),
         ...(await Promise.all([arcPositions(address), arcActivity(address)]).then(([positions, activity]) => ({ positions, activity }))),
       }))
   );
@@ -516,7 +533,9 @@ async function loadBridgeWatch() {
       arcTransfers: transfers.length,
       waitingTransfers: waiting.length,
       waitingUsdc: waiting.reduce((sum, transfer) => sum + transfer.amountUsdc, 0),
-      limitation: "This is a recent rolling sample, not the all-time bridge total.",
+      limitation: routerResult.available
+        ? "This is a recent rolling sample, not the all-time bridge total."
+        : "This is a recent rolling sample, not the all-time bridge total. The Base Arc router feed was unreachable in this refresh, so router-initiated transfers are missing from it.",
     },
     indexedHistory: {
       transfers: historicalRows,
@@ -560,6 +579,7 @@ async function loadBridgeWatch() {
     evidence: {
       baseTokenMessenger: BASE_TOKEN_MESSENGER,
       baseArcRouter: BASE_ARC_ROUTER,
+      baseArcRouterAvailable: routerResult.available,
       baseExplorer: BASE_BLOCKSCOUT,
       circleAttestationApi: IRIS_API,
       observedArcExplorer: arcObserved().url || null,
@@ -568,7 +588,16 @@ async function loadBridgeWatch() {
         domain: source.domain,
         explorer: source.explorer,
         available: sourceBodies.some((item) => item.source.key === source.key),
-      })), { chain: "solana", domain: 5, explorer: "https://solscan.io", available: true }],
+        note: null as string | null,
+      })), {
+        // Solana burns are never queried in this path, so reporting the source
+        // as available claimed coverage that does not exist.
+        chain: "solana",
+        domain: 5,
+        explorer: "https://solscan.io",
+        available: false,
+        note: "Solana CCTP burns are not queried by this feed, so they are a gap rather than a covered source.",
+      }],
     },
     refreshedAt: new Date().toISOString(),
   };
@@ -577,8 +606,16 @@ async function loadBridgeWatch() {
 export async function bridgeRoutes(app: FastifyInstance) {
   app.get("/bridge-watch", async () => {
     if (cache && cache.expiresAt > Date.now()) return cache.value;
-    const value = await loadBridgeWatch();
-    cache = { value, expiresAt: Date.now() + CACHE_MS };
-    return value;
+    if (!inFlight) {
+      inFlight = loadBridgeWatch()
+        .then((value) => {
+          cache = { value, expiresAt: Date.now() + CACHE_MS };
+          return value;
+        })
+        .finally(() => {
+          inFlight = null;
+        });
+    }
+    return inFlight;
   });
 }

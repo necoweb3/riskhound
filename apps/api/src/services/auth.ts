@@ -17,11 +17,36 @@ function encode(payload: TokenPayload) {
 function decode(token: string, kind: TokenPayload["kind"]) {
   const [encoded, signature] = token.split(".");
   if (!encoded || !signature) return null;
-  const expected = sign(encoded);
-  if (signature.length !== expected.length || !timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) return null;
-  const payload = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as TokenPayload;
-  if (payload.kind !== kind || payload.exp < Date.now()) return null;
-  return payload;
+  // timingSafeEqual throws when the buffers differ in length, and a multibyte
+  // signature can match the expected string length while differing in bytes.
+  const provided = Buffer.from(signature);
+  const expected = Buffer.from(sign(encoded));
+  if (provided.length !== expected.length || !timingSafeEqual(provided, expected)) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as TokenPayload;
+    if (payload.kind !== kind || payload.exp < Date.now()) return null;
+    return payload;
+  } catch {
+    // Malformed token content is a rejected credential, not a server error.
+    return null;
+  }
+}
+
+/**
+ * A challenge nonce is single use. Without this a captured signature could mint
+ * a fresh session on every replay until the challenge expired. Process local,
+ * so a multi-instance deployment still needs a shared store.
+ */
+const usedNonces = new Map<string, number>();
+
+function consumeNonce(nonce: string | undefined, expiresAt: number) {
+  const now = Date.now();
+  for (const [used, expiry] of usedNonces) {
+    if (expiry <= now) usedNonces.delete(used);
+  }
+  if (!nonce || usedNonces.has(nonce)) return false;
+  usedNonces.set(nonce, expiresAt);
+  return true;
 }
 
 export function createWalletChallenge(addressInput: string) {
@@ -48,6 +73,7 @@ export async function verifyWalletChallenge(input: { challenge: string; message:
   if (input.message !== expected) return null;
   const valid = await verifyMessage({ address: payload.address as `0x${string}`, message: expected, signature: input.signature });
   if (!valid) return null;
+  if (!consumeNonce(payload.nonce, payload.exp)) return null;
   return {
     address: payload.address,
     sessionToken: encode({ address: payload.address, exp: Date.now() + 7 * 24 * 60 * 60_000, kind: "session" }),

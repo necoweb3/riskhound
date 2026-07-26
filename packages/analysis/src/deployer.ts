@@ -13,16 +13,23 @@ export async function buildDeployerProfile(opts: {
   let firstFunder: string | null = null;
   const previousTokens: DeployerProfile["previousTokens"] = [];
   const timeline: TimelineEvent[] = [];
+  // A transaction list we could not read to its end says nothing about when
+  // this wallet started, so it must not support an age or a history label.
+  let historyComplete = false;
 
   try {
     const txs = await opts.explorer.getAddressTransactions(address);
     const items = txs.items ?? [];
+    const cursor = txs.next_page_params as Record<string, unknown> | null | undefined;
+    historyComplete = !cursor || Object.keys(cursor).length === 0;
     if (items.length) {
       // API typically returns newest first
       const newest = items[0];
       const oldest = items[items.length - 1];
       lastSeenAt = newest.timestamp ?? null;
-      firstSeenAt = oldest.timestamp ?? newest.timestamp ?? null;
+      // With a page cursor still open, the oldest row here is only the oldest
+      // on this page, and a busy deployer would be reported as brand new.
+      firstSeenAt = historyComplete ? oldest.timestamp ?? newest.timestamp ?? null : null;
 
       for (const tx of items) {
         const created = tx.created_contract?.hash;
@@ -42,7 +49,9 @@ export async function buildDeployerProfile(opts: {
           timeline.push({
             id: `deploy-${tx.hash}`,
             type: "deploy",
-            timestamp: tx.timestamp ?? new Date().toISOString(),
+            // Same rule as every other chain event: an unknown time stays
+            // unknown rather than being stamped with the analysis time.
+            timestamp: tx.timestamp ?? null,
             chain: opts.chain,
             title: "Contract creation",
             txHash: tx.hash,
@@ -89,7 +98,11 @@ export async function buildDeployerProfile(opts: {
   }
 
   let historyLabel: DeployerProfile["historyLabel"] = "unknown";
-  if (!firstSeenAt) historyLabel = "limited_history";
+  if (!historyComplete) {
+    // Truncated history proves the wallet is at least as old as what was read,
+    // so neither "limited" nor "established" is supported by it.
+    historyLabel = "unknown";
+  } else if (!firstSeenAt) historyLabel = "limited_history";
   else if (ageDays != null && ageDays < 7) historyLabel = "limited_history";
   else historyLabel = "established";
 

@@ -42,27 +42,78 @@ export async function persistEvidenceGraph(graph: EvidenceGraph, chain = "arc_te
   }
 }
 
+/**
+ * Mirrors EventClass in @rugkiller/shared. This package has no dependency on
+ * shared, so the union is restated here and must stay in sync with it.
+ */
+type EventClass =
+  | "confirmed_malicious"
+  | "high_risk_exit"
+  | "suspicious_rug_behavior"
+  | "honeypot_behavior"
+  | "abandoned_token"
+  | "heavy_insider_control"
+  | "insufficient_evidence";
+
+/**
+ * Classification is keyed on the finding's category, which is a stable part of
+ * the risk model, rather than on its display name: copy changes silently
+ * reclassify events, and the old regex fell through to heavy_insider_control
+ * for anything it did not recognise, asserting insider control with no evidence
+ * for it. confirmed_malicious is deliberately absent because it requires a
+ * reviewed decision, never an automatic one.
+ */
+const EVENT_CLASS_BY_CATEGORY: Record<string, EventClass> = {
+  contract: "suspicious_rug_behavior",
+  owner_admin: "heavy_insider_control",
+  buy_sell: "honeypot_behavior",
+  liquidity: "high_risk_exit",
+  holder_concentration: "heavy_insider_control",
+  insider_links: "heavy_insider_control",
+  deployer_history: "suspicious_rug_behavior",
+  cross_chain: "suspicious_rug_behavior",
+  market_behavior: "suspicious_rug_behavior",
+  data_gaps: "insufficient_evidence",
+};
+
 export async function persistAutomaticRiskEvents(input: {
   tokenId: string;
   tokenAddress: string;
   chain: string;
-  findings: { id: string; name: string; summary: string; severity: string; controllerAddress?: string; evidence: unknown[] }[];
+  findings: { id: string; category: string; name: string; summary: string; severity: string; controllerAddress?: string; evidence: unknown[] }[];
 }) {
   for (const finding of input.findings.filter((f) => f.severity === "critical" || f.severity === "high")) {
-    const eventClass = /liquidity|lp/i.test(finding.name)
-      ? "liquidity_removal"
-      : /sell|honeypot/i.test(finding.name)
-        ? "suspicious_rug_behavior"
-        : "heavy_insider_control";
+    // An unmapped category is a gap in this table, not a licence to guess.
+    const eventClass = EVENT_CLASS_BY_CATEGORY[finding.category] ?? "insufficient_evidence";
+    // No time window: a token that stays flagged for the same reason used to
+    // gain one identical row per day forever. The open automatic event is
+    // refreshed instead so the feed keeps one row per distinct finding.
     const existing = await prisma.riskEvent.findFirst({
       where: {
         chain: input.chain,
         tokenAddress: input.tokenAddress,
         title: finding.name,
-        createdAt: { gte: new Date(Date.now() - 86_400_000) },
+        autoDetected: true,
       },
+      // Rows written before this dedupe existed can still be duplicated, so the
+      // refresh is pinned to the oldest match rather than an arbitrary one.
+      orderBy: { occurredAt: "asc" },
     });
-    if (existing) continue;
+    if (existing) {
+      // "confirmed" and "rejected" are the reviewed states. Rewriting the
+      // detail or evidence underneath a reviewer's decision would leave it
+      // standing on proof nobody looked at, and a degraded run that produced no
+      // evidence refs would strip the proof from a confirmed event entirely.
+      const reviewed = existing.manualStatus === "confirmed" || existing.manualStatus === "rejected";
+      if (!reviewed) {
+        await prisma.riskEvent.update({
+          where: { id: existing.id },
+          // occurredAt is left alone so it still records the first observation.
+          data: { detail: finding.summary, evidenceJson: jstr(finding.evidence), eventClass },
+        });
+      }
+      continue;
+    }
     await prisma.riskEvent.create({
       data: {
         chain: input.chain,

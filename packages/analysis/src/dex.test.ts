@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { isRevert } from "./dex.js";
+import { analyzeApexiSwap, isRevert } from "./dex.js";
+import type { BlockscoutClient, PublicClient } from "@rugkiller/chain";
+import type { Address } from "viem";
 
 /**
  * canSell === false is the honeypot verdict. It may only come from a proven
@@ -44,5 +46,80 @@ describe("isRevert", () => {
     // reports a transport condition.
     const e = new Error("HTTP 429 too many requests while estimating; execution reverted");
     expect(isRevert(e)).toBe(false);
+  });
+});
+
+const TOKEN = "0x1111111111111111111111111111111111111111" as Address;
+const PAIR = "0x2222222222222222222222222222222222222222";
+const DEAD = "0x000000000000000000000000000000000000dead";
+
+/** Reserves are zero so the round-trip simulation is never reached. */
+function rpcWithPair(): PublicClient {
+  return {
+    readContract: async ({ functionName }: { functionName: string }) => {
+      switch (functionName) {
+        case "getPair":
+          return PAIR;
+        case "token0":
+          return TOKEN;
+        case "token1":
+          return "0x911b4000D3422F482F4062a913885f7b035382Df";
+        case "getReserves":
+          return [0n, 0n, 0];
+        default:
+          throw new Error(`unexpected call: ${functionName}`);
+      }
+    },
+  } as unknown as PublicClient;
+}
+
+/**
+ * "Burned" is the reassuring answer about a pool, so it may only come from LP
+ * records that were actually read.
+ */
+describe("analyzeApexiSwap LP burn share", () => {
+  it("reports the burned share as unknown when the holder list did not answer", async () => {
+    const explorer = {
+      getToken: async () => ({ total_supply: "1000000" }),
+      getTokenHolders: async () => {
+        throw new Error("explorer down");
+      },
+      getTokenTransfers: async () => ({ items: [] }),
+    } as unknown as BlockscoutClient;
+
+    const res = await analyzeApexiSwap({
+      chain: "arc_testnet",
+      token: TOKEN,
+      tokenDecimals: 18,
+      rpc: rpcWithPair(),
+      explorer,
+    });
+
+    expect(res.pair?.burned).toBeNull();
+    expect(res.lpDataComplete).toBe(false);
+  });
+
+  it("reports the burned share once supply and holders were both read", async () => {
+    const explorer = {
+      getToken: async () => ({ total_supply: "1000000" }),
+      getTokenHolders: async () => ({
+        items: [
+          { address: DEAD, value: "950000" },
+          { address: "0x3333333333333333333333333333333333333333", value: "50000" },
+        ],
+      }),
+      getTokenTransfers: async () => ({ items: [] }),
+    } as unknown as BlockscoutClient;
+
+    const res = await analyzeApexiSwap({
+      chain: "arc_testnet",
+      token: TOKEN,
+      tokenDecimals: 18,
+      rpc: rpcWithPair(),
+      explorer,
+    });
+
+    expect(res.pair?.burned).toBe(true);
+    expect(res.lpDataComplete).toBe(true);
   });
 });

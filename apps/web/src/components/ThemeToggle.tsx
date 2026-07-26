@@ -14,8 +14,14 @@ function apply(mode: Mode) {
   if (mode === "system") root.removeAttribute("data-theme");
   else root.setAttribute("data-theme", mode);
   const dark = mode === "dark" || (mode === "system" && systemIsDark());
-  const meta = document.querySelector('meta[name="theme-color"]');
-  if (meta) meta.setAttribute("content", dark ? "#08090a" : "#fbfbfc");
+  // The layout ships media-scoped theme-color tags, so writing to the first
+  // match puts the chosen colour on the light-only tag. Only the tag whose
+  // media currently matches is the one the browser actually reads.
+  const active = Array.from(document.querySelectorAll('meta[name="theme-color"]')).find((m) => {
+    const media = m.getAttribute("media");
+    return !media || window.matchMedia(media).matches;
+  });
+  if (active) active.setAttribute("content", dark ? "#08090a" : "#fbfbfc");
 }
 
 /** Read the stored preference. Safe to call in the browser only. */
@@ -41,10 +47,11 @@ export function ThemeToggle() {
 
     const mq = window.matchMedia("(prefers-color-scheme: dark)");
     const onChange = () => {
-      if (readMode() === "system") {
-        setDark(mq.matches);
-        apply("system");
-      }
+      const current = readMode();
+      if (current === "system") setDark(mq.matches);
+      // Re-apply either way: the system flip changes which theme-color tag the
+      // browser reads, so the chrome colour has to be written to the new one.
+      apply(current);
     };
     mq.addEventListener("change", onChange);
     return () => mq.removeEventListener("change", onChange);

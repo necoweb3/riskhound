@@ -61,6 +61,38 @@ describe("buildRiskReport", () => {
     expect(moved[0]?.status).toBe("theoretical");
   });
 
+  it("takes category completeness from the analyzer, not from finding names", () => {
+    const report = buildRiskReport({
+      findings: [],
+      dataSources: [{ key: "arc", name: "Arc", healthy: true, usedInThisAnalysis: true }],
+      lastBlock: 1,
+      tokenAddress: "0xtoken",
+      // Nothing in `findings` says "incomplete", so the old name match called
+      // this category clean while the analyzer knew it had read nothing.
+      analyzerCompleteness: { liquidity: false, holder_concentration: true },
+    });
+
+    expect(report.categories.find((c) => c.category === "liquidity")?.dataComplete).toBe(false);
+    expect(report.categories.find((c) => c.category === "holder_concentration")?.dataComplete).toBe(true);
+    expect(report.confidence).not.toBe("high");
+  });
+
+  it("shows an unread deployer history as a gap rather than as no signal", () => {
+    const report = buildRiskReport({
+      findings: [],
+      dataSources: [{ key: "arc", name: "Arc", healthy: true, usedInThisAnalysis: true }],
+      lastBlock: 1,
+      tokenAddress: "0xtoken",
+      deployerHistoryLabel: "unknown",
+      deployerAddress: "0xdeployer",
+    });
+
+    const gaps = report.categories.find((c) => c.category === "data_gaps")?.findings ?? [];
+    expect(gaps.map((f) => f.id)).toContain("deployer-history-unknown");
+    // It must not be reported as little history either, which is a claim.
+    expect(report.topFindings.some((f) => f.name === "Limited deployer history")).toBe(false);
+  });
+
   it("does not report high confidence while a category is incomplete", () => {
     const report = buildRiskReport({
       findings: [],

@@ -12,21 +12,39 @@ export function authHeaders(): Record<string, string> {
   return token ? { authorization: `Bearer ${token}` } : {};
 }
 
+// Session identity is shared, not per component: a page that authenticates
+// with it has to hear about a sign-in that happened in the wallet bar.
+const listeners = new Set<() => void>();
+
+function read(key: string) {
+  if (typeof window === "undefined") return "";
+  try {
+    return localStorage.getItem(key) ?? "";
+  } catch {
+    return "";
+  }
+}
+
 export function useWallet() {
-  const [wallet, setWallet] = useState<string>("");
+  const [state, setState] = useState({ wallet: "", session: "" });
 
   useEffect(() => {
-    setWallet(localStorage.getItem(KEY) ?? "");
+    const sync = () => setState({ wallet: read(KEY), session: read(SESSION_KEY) });
+    sync();
+    listeners.add(sync);
+    return () => {
+      listeners.delete(sync);
+    };
   }, []);
 
   const save = (v: string) => {
     const n = v.trim().toLowerCase();
-    setWallet(n);
     if (n) localStorage.setItem(KEY, n);
     else localStorage.removeItem(KEY);
+    listeners.forEach((fn) => fn());
   };
 
-  return { wallet, setWallet: save };
+  return { wallet: state.wallet, session: state.session, setWallet: save };
 }
 
 export function WalletBar() {
@@ -83,7 +101,7 @@ export function WalletBar() {
         Sign in
       </button>
       {wallet && (
-        <button className="btn" type="button" onClick={() => { setWallet(""); localStorage.removeItem(SESSION_KEY); }}>
+        <button className="btn" type="button" onClick={() => { localStorage.removeItem(SESSION_KEY); setWallet(""); }}>
           Clear
         </button>
       )}

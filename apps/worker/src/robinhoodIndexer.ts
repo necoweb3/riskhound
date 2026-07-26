@@ -1,4 +1,5 @@
 import { getRobinhoodClients } from "@rugkiller/chain";
+import type { BsTokenInfo } from "@rugkiller/chain";
 import { prisma, jstr } from "@rugkiller/db";
 import type { EventClass } from "@rugkiller/shared";
 
@@ -9,20 +10,25 @@ export async function runRobinhoodIndexer() {
   try {
     const b = await rh.explorer.getLatestBlock();
     latest = b?.number ?? null;
+    // getLatestBlock() returns null instead of throwing when the explorer is
+    // unreadable, so only a real head read may refresh the success timestamp
+    // or clear the previous error.
+    const headError = latest != null ? null : "Explorer did not return a latest block.";
     await prisma.dataSourceHealth.upsert({
       where: { key: "rh_explorer" },
       create: {
         key: "rh_explorer",
         name: "Robinhood Blockscout",
         healthy: latest != null,
-        lastSuccessAt: new Date(),
+        lastSuccessAt: latest != null ? new Date() : null,
         lastBlock: latest != null ? BigInt(latest) : null,
+        lastError: headError,
       },
       update: {
         healthy: latest != null,
-        lastSuccessAt: new Date(),
+        lastSuccessAt: latest != null ? new Date() : undefined,
         lastBlock: latest != null ? BigInt(latest) : undefined,
-        lastError: null,
+        lastError: headError,
       },
     });
   } catch (e) {
@@ -43,10 +49,23 @@ export async function runRobinhoodIndexer() {
   }
 
   try {
-    const tokens = await rh.explorer.getTokens({ type: "ERC-20" });
+    // Walk the explorer pages instead of the first slice of page one, so tokens
+    // past the newest few are indexed at all. Bounded to keep one poll finite.
+    const maxPagesEnv = Number(process.env.ROBINHOOD_INDEXER_MAX_PAGES ?? 5);
+    const maxPages = Number.isFinite(maxPagesEnv) && maxPagesEnv >= 1 ? Math.floor(maxPagesEnv) : 5;
+    const items: BsTokenInfo[] = [];
+    let cursor: Record<string, unknown> | null = null;
+    let pages = 0;
+    do {
+      const page = await rh.explorer.getTokens({ type: "ERC-20", cursor });
+      items.push(...(page.items ?? []));
+      cursor = page.next_page_params ?? null;
+      pages++;
+    } while (cursor && pages < maxPages);
+
     let processed = 0;
-    for (const t of (tokens.items ?? []).slice(0, 25)) {
-      const address = (t.address ?? "").toLowerCase();
+    for (const t of items) {
+      const address = (t.address ?? t.address_hash ?? "").toLowerCase();
       if (!address.startsWith("0x")) continue;
       processed++;
 
@@ -122,9 +141,11 @@ export async function runRobinhoodIndexer() {
             await upsertEvent({
               chain: "robinhood",
               eventClass: "suspicious_rug_behavior",
-              title: `Serial contract deployer (${deploys.length}+ recent creations)`,
+              // upsertEvent dedupes on the title, so the creation count has to
+              // live in the detail or every change of it creates a new event.
+              title: "Serial contract deployer",
               detail:
-                "Multiple contract creations from same wallet on recent explorer page. Not proof of malice; flagged for correlation.",
+                `${deploys.length} contract creations from same wallet on recent explorer page. Not proof of malice; flagged for correlation.`,
               tokenAddress: address,
               addresses: [deployer],
               confidence: "low",
@@ -143,7 +164,7 @@ export async function runRobinhoodIndexer() {
         }
       }
     }
-    console.log(`[rh-indexer] processed ${processed} tokens`);
+    console.log(`[rh-indexer] processed ${processed} tokens across ${pages} pages`);
   } catch (e) {
     console.warn("[rh-indexer] tokens", e instanceof Error ? e.message : e);
   }

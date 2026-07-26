@@ -30,6 +30,7 @@ export function CountUp({
     if (!el || done.current) return;
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
 
+    let raf = 0;
     const io = new IntersectionObserver(
       (entries) => {
         if (!entries[0]?.isIntersecting || done.current) return;
@@ -40,14 +41,19 @@ export function CountUp({
           if (!t0) t0 = t;
           const p = Math.min(1, (t - t0) / duration);
           setShown(value * (1 - Math.pow(1 - p, 3)));
-          if (p < 1) requestAnimationFrame(step);
+          if (p < 1) raf = requestAnimationFrame(step);
         };
-        requestAnimationFrame(step);
+        raf = requestAnimationFrame(step);
       },
       { threshold: 0.2 },
     );
     io.observe(el);
-    return () => io.disconnect();
+    // The frame chain outlives the component otherwise, and setState on an
+    // unmounted node is a leak.
+    return () => {
+      io.disconnect();
+      if (raf) cancelAnimationFrame(raf);
+    };
   }, [value, duration]);
 
   return (

@@ -24,8 +24,10 @@ export default function ScanPage() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({}),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.message ?? "Check failed. Try again.");
+      // An error response is not always JSON, so parsing first turns a 502 into
+      // a raw SyntaxError in the user's face.
+      const data = (await res.json().catch(() => null)) as { message?: string } | null;
+      if (!res.ok) throw new Error(data?.message ?? "Check failed. Try again.");
       router.push(`/token/${addr.toLowerCase()}`);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Something went wrong");

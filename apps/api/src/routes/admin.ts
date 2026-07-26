@@ -51,13 +51,27 @@ export async function adminRoutes(app: FastifyInstance) {
     };
   });
 
-  app.get("/admin/events/review", async () => {
-    const items = await prisma.riskEvent.findMany({
-      where: { OR: [{ manualStatus: "pending" }, { manualStatus: "none", autoDetected: true }] },
-      orderBy: { occurredAt: "desc" },
-      take: 50,
-    });
-    return { items };
+  app.get("/admin/events/review", async (req) => {
+    // Without paging the oldest pending events sat behind the take() forever.
+    const q = z
+      .object({
+        limit: z.coerce.number().min(1).max(100).optional().default(50),
+        offset: z.coerce.number().min(0).optional().default(0),
+      })
+      .parse(req.query);
+    const where = {
+      OR: [{ manualStatus: "pending" }, { manualStatus: "none", autoDetected: true }],
+    };
+    const [items, total] = await Promise.all([
+      prisma.riskEvent.findMany({
+        where,
+        orderBy: { occurredAt: "desc" },
+        take: q.limit,
+        skip: q.offset,
+      }),
+      prisma.riskEvent.count({ where }),
+    ]);
+    return { items, total, limit: q.limit, offset: q.offset };
   });
 
   app.post("/admin/events/:id/review", async (req, reply) => {
@@ -68,7 +82,10 @@ export async function adminRoutes(app: FastifyInstance) {
         reason: z.string().min(3),
       })
       .parse(req.body);
-    const wallet = authenticatedAddress(req.headers) ?? "admin";
+    // The audit trail has to name the reviewer who made the call, so an
+    // unauthenticated decision is refused instead of logged as "admin".
+    const wallet = authenticatedAddress(req.headers);
+    if (!wallet) return reply.code(401).send({ error: "reviewer_required" });
     const before = await prisma.riskEvent.findUnique({ where: { id } });
     if (!before) return reply.code(404).send({ error: "not_found" });
 
@@ -110,7 +127,8 @@ export async function adminRoutes(app: FastifyInstance) {
         decisionReason: z.string().min(3),
       })
       .parse(req.body);
-    const wallet = authenticatedAddress(req.headers) ?? "admin";
+    const wallet = authenticatedAddress(req.headers);
+    if (!wallet) return reply.code(401).send({ error: "reviewer_required" });
     const before = await prisma.appeal.findUnique({ where: { id } });
     if (!before) return reply.code(404).send({ error: "not_found" });
     const after = await prisma.appeal.update({
@@ -138,7 +156,8 @@ export async function adminRoutes(app: FastifyInstance) {
         reason: z.string().min(3),
       })
       .parse(req.body);
-    const wallet = authenticatedAddress(req.headers) ?? "admin";
+    const wallet = authenticatedAddress(req.headers);
+    if (!wallet) return reply.code(401).send({ error: "reviewer_required" });
     const before = await prisma.finding.findUnique({ where: { id } });
     if (!before) return reply.code(404).send({ error: "not_found" });
     const after = await prisma.finding.update({

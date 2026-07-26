@@ -15,20 +15,25 @@ export async function runArcDiscovery(): Promise<string[]> {
   try {
     const b = await arc.explorer.getLatestBlock();
     latest = b?.number ?? null;
+    // getLatestBlock() returns null instead of throwing when the explorer is
+    // unreadable, so only a real head read may count as a success. Otherwise
+    // the previous success timestamp has to stand so the gap stays visible.
+    const headError = latest != null ? null : "Explorer did not return a latest block.";
     await prisma.dataSourceHealth.upsert({
       where: { key: "arc_explorer" },
       create: {
         key: "arc_explorer",
         name: "Arc Blockscout",
         healthy: latest != null,
-        lastSuccessAt: new Date(),
+        lastSuccessAt: latest != null ? new Date() : null,
         lastBlock: latest != null ? BigInt(latest) : null,
+        lastError: headError,
       },
       update: {
         healthy: latest != null,
-        lastSuccessAt: new Date(),
+        lastSuccessAt: latest != null ? new Date() : undefined,
         lastBlock: latest != null ? BigInt(latest) : undefined,
-        lastError: null,
+        lastError: headError,
       },
     });
   } catch (e) {
@@ -118,8 +123,10 @@ export async function runArcDiscovery(): Promise<string[]> {
     let inventoryCursor: Record<string, unknown> | null = null;
     let inventoryPages = 0;
     let inventoryIndexed = 0;
+    let inventoryRows = 0;
     do {
       const tokens = await arc.explorer.getTokens({ type: "ERC-20", cursor: inventoryCursor });
+      inventoryRows += (tokens.items ?? []).length;
       const candidates = (tokens.items ?? []).flatMap((t) => {
         const address = (t.address ?? t.address_hash ?? "").toLowerCase();
         const name = t.name?.trim() || null;
@@ -166,19 +173,27 @@ export async function runArcDiscovery(): Promise<string[]> {
       inventoryPages++;
     } while (runFullInventory && inventoryCursor && inventoryPages < 100);
 
+    // getTokens() converts explorer HTTP failures into an empty page, so a run
+    // that saw no rows at all cannot be told apart from an outage. Record that
+    // as a gap instead of a healthy inventory containing zero tokens.
+    const inventoryOk = inventoryRows > 0;
+    const inventoryError = inventoryOk
+      ? null
+      : "Explorer returned no token rows; inventory treated as unavailable.";
     if (runFullInventory) await prisma.dataSourceHealth.upsert({
       where: { key: "arc_testnet_tokens" },
       create: {
         key: "arc_testnet_tokens",
         name: "Arc Testnet token inventory",
-        healthy: true,
-        lastSuccessAt: new Date(),
+        healthy: inventoryOk,
+        lastSuccessAt: inventoryOk ? new Date() : null,
+        lastError: inventoryError,
         metaJson: JSON.stringify({ indexed: inventoryIndexed, pages: inventoryPages }),
       },
       update: {
-        healthy: true,
-        lastSuccessAt: new Date(),
-        lastError: null,
+        healthy: inventoryOk,
+        lastSuccessAt: inventoryOk ? new Date() : undefined,
+        lastError: inventoryError,
         metaJson: JSON.stringify({ indexed: inventoryIndexed, pages: inventoryPages }),
       },
     });
@@ -204,17 +219,23 @@ export async function runArcDiscovery(): Promise<string[]> {
     const from =
       Number(cursor.lastBlock) > 0 ? Number(cursor.lastBlock) + 1 : Math.max(0, latest - 20);
     const to = latest;
-    const end = Math.min(to, from + 12);
+    const perPoll = Number(process.env.ARC_DISCOVERY_MAX_BLOCKS ?? 500);
+    const maxBlocks = Number.isFinite(perPoll) && perPoll >= 1 ? Math.floor(perPoll) : 500;
+    const end = Math.min(to, from + maxBlocks - 1);
+
+    // The cursor may only advance over blocks that were scanned end to end.
+    // Committing `end` after a break or an RPC error skipped those blocks for good.
+    let lastScanned = from - 1;
 
     for (let bn = from; bn <= end; bn++) {
+      let blockComplete = true;
       try {
         const block = await arc.rpc.getBlock({
           blockNumber: BigInt(bn),
           includeTransactions: true,
         });
-        if (!block?.transactions) continue;
 
-        for (const tx of block.transactions) {
+        for (const tx of block?.transactions ?? []) {
           if (typeof tx === "string") continue;
           if (tx.to != null || !tx.hash) continue;
 
@@ -280,25 +301,27 @@ export async function runArcDiscovery(): Promise<string[]> {
             } else if (!existing.analysisUpdatedAt) {
               found.push(created);
             }
-          } catch {
-            /* skip tx */
+          } catch (e) {
+            // A creation we could not read leaves this block incomplete, so it
+            // has to be rescanned rather than skipped.
+            console.warn(`[arc-discovery] tx ${tx.hash}`, e instanceof Error ? e.message : e);
+            blockComplete = false;
           }
         }
       } catch (e) {
         console.warn(`[arc-discovery] block ${bn}`, e instanceof Error ? e.message : e);
-        break;
+        blockComplete = false;
       }
+      if (!blockComplete) break;
+      lastScanned = bn;
     }
 
-    await prisma.indexerCursor.update({
-      where: { key: "arc_token_discovery" },
-      data: { lastBlock: BigInt(end), lastAt: new Date() },
-    });
-  } else if (latest != null) {
-    await prisma.indexerCursor.update({
-      where: { key: "arc_token_discovery" },
-      data: { lastBlock: BigInt(latest), lastAt: new Date() },
-    });
+    if (lastScanned >= from) {
+      await prisma.indexerCursor.update({
+        where: { key: "arc_token_discovery" },
+        data: { lastBlock: BigInt(lastScanned), lastAt: new Date() },
+      });
+    }
   }
 
   if (found.length) {

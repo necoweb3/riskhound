@@ -80,7 +80,21 @@ function assessObservedRisk(opts: {
  * everything the explorer used to supply except the parts that need an index:
  * holder lists, the creator address and source verification.
  */
-async function readContractOverRpc(address: `0x${string}`) {
+/**
+ * A request must answer even when the node does not. viem's per-call timeout
+ * is not a budget for the whole read, so several slow calls could still add up
+ * past the proxy's limit and the request would die with no response at all.
+ */
+const RPC_READ_BUDGET_MS = Number(process.env.OBSERVED_ARC_READ_BUDGET_MS ?? 8_000);
+
+function withBudget<T>(work: Promise<T>, fallback: T, ms = RPC_READ_BUDGET_MS): Promise<T> {
+  return Promise.race([
+    work,
+    new Promise<T>((resolve) => setTimeout(() => resolve(fallback), ms).unref?.()),
+  ]);
+}
+
+async function readContractOverRpcUnbounded(address: `0x${string}`) {
   const empty = {
     reachable: false,
     hasCode: false,
@@ -151,6 +165,31 @@ async function readContractOverRpc(address: `0x${string}`) {
     owner: meta?.owner?.toLowerCase() ?? null,
     signals,
   };
+}
+
+type RpcRead = Awaited<ReturnType<typeof readContractOverRpcUnbounded>>;
+
+const UNREACHABLE: RpcRead = {
+  reachable: false,
+  hasCode: false,
+  blockNumber: null,
+  bytecodeHash: null,
+  isProxy: false,
+  proxyReasons: [],
+  selectors: [],
+  name: null,
+  symbol: null,
+  decimals: null,
+  totalSupply: null,
+  owner: null,
+  signals: [],
+};
+
+function readContractOverRpc(address: `0x${string}`) {
+  return withBudget(
+    readContractOverRpcUnbounded(address).catch(() => UNREACHABLE),
+    UNREACHABLE
+  );
 }
 
 function encodeCursor(value: unknown) {
@@ -237,7 +276,11 @@ export async function observedMainnetRoutes(app: FastifyInstance) {
     const orderBy = query.sort === "holders"
       ? [{ holderCount: "desc" as const }, { createdAt: "desc" as const }]
       : query.sort === "high_risk" || query.sort === "critical"
-        ? [{ overallRisk: "desc" as const }, { holderCount: "desc" as const }]
+        // The where clause above narrows overallRisk to critical_risk and
+        // high_risk, and "critical_risk" sorts before "high_risk" ascending.
+        // Descending put the milder level first, so critical tokens were paged
+        // off the first page before the client could reorder them.
+        ? [{ overallRisk: "asc" as const }, { holderCount: "desc" as const }]
         : [{ createdAt: "desc" as const }, { address: "asc" as const }];
     const [cached, total] = await Promise.all([
       prisma.token.findMany({ where, orderBy, take: query.limit, skip: (query.page - 1) * query.limit }),

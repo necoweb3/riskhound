@@ -158,7 +158,9 @@ export interface CrossChainLink {
 export interface TimelineEvent {
   id: string;
   type: string;
-  timestamp: string;
+  /** Null when the chain did not supply a time. Never the analysis time: a
+   *  fabricated date is worse than a visible gap. */
+  timestamp: string | null;
   chain: string;
   title: string;
   detail?: string;

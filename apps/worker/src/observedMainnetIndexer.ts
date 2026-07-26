@@ -30,6 +30,8 @@ export async function runObservedMainnetIndexer() {
     return;
   }
 
+  const maxPagesEnv = Number(process.env.OBSERVED_ARC_INVENTORY_MAX_PAGES ?? 100);
+  const maxPages = Number.isFinite(maxPagesEnv) && maxPagesEnv >= 1 ? Math.floor(maxPagesEnv) : 100;
   let cursor: Record<string, unknown> | null = null;
   let pages = 0;
   let indexed = 0;
@@ -64,12 +66,16 @@ export async function runObservedMainnetIndexer() {
     }
     cursor = body.next_page_params ?? null;
     pages++;
-  } while (cursor && pages < 100);
+  } while (cursor && pages < maxPages);
 
+  // Stopping on the page bound leaves the rest of the token list unread. That
+  // is an incomplete inventory, so it must not be published as a healthy run.
+  const complete = cursor == null;
+  const lastError = complete ? null : `Token inventory truncated after ${pages} pages; more pages remain unread.`;
   await prisma.dataSourceHealth.upsert({
     where: { key: "arc_observed_5042_tokens" },
-    create: { key: "arc_observed_5042_tokens", name: "Observed Arc 5042 token inventory", healthy: true, lastSuccessAt: new Date(), metaJson: JSON.stringify({ indexed, pages }) },
-    update: { healthy: true, lastSuccessAt: new Date(), lastError: null, metaJson: JSON.stringify({ indexed, pages }) },
+    create: { key: "arc_observed_5042_tokens", name: "Observed Arc 5042 token inventory", healthy: complete, lastSuccessAt: complete ? new Date() : null, lastError, metaJson: JSON.stringify({ indexed, pages, complete }) },
+    update: { healthy: complete, lastSuccessAt: complete ? new Date() : undefined, lastError, metaJson: JSON.stringify({ indexed, pages, complete }) },
   });
-  return { indexed, pages };
+  return { indexed, pages, complete };
 }

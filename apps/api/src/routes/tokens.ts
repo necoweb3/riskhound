@@ -10,7 +10,13 @@ import {
 } from "../services/persist.js";
 import { enqueueAnalysis } from "../queue.js";
 
+/** Search resolves matching ids with a portable LIKE, so the id set is capped. */
+const SEARCH_MATCH_LIMIT = 500;
+
 const listQuery = z.object({
+  // "new_deployer", "known_deployer" and "unlocked_lp" used to be accepted here
+  // and then applied no filter, so callers got the whole feed back as if it had
+  // been filtered. They stay rejected until each filter is defined.
   sort: z
     .enum([
       "newest",
@@ -19,9 +25,6 @@ const listQuery = z.object({
       "high_risk",
       "critical",
       "robinhood",
-      "new_deployer",
-      "known_deployer",
-      "unlocked_lp",
       "sim_fail",
     ])
     .optional()
@@ -57,17 +60,29 @@ export async function tokenRoutes(app: FastifyInstance) {
         ];
       }
 
-      if (q.q) {
-        const term = q.q.trim();
-        baseWhere.AND = [
-          {
-            OR: [
-              { address: { contains: term.toLowerCase() } },
-              { name: { contains: term } },
-              { symbol: { contains: term } },
-            ],
-          },
-        ];
+      // Prisma's contains is case sensitive on Postgres and case insensitive on
+      // SQLite, and mode: "insensitive" does not exist on the SQLite client, so
+      // matching runs against a lowercased form in SQL to behave the same way
+      // on both.
+      let searchTruncated = false;
+      const term = q.q?.trim().toLowerCase() ?? "";
+      if (term) {
+        const pattern = `%${term.replace(/[\\%_]/g, (char) => `\\${char}`)}%`;
+        // The cap needs an order, or the kept slice is whatever the planner
+        // returned: paging a truncated search would drop and repeat rows
+        // between requests. Analyzed tokens come first so the slice holds the
+        // rows the feed can actually show.
+        const matches = await prisma.$queryRaw<{ id: string }[]>`
+          SELECT "id" FROM "Token"
+          WHERE "chain" = 'arc_testnet'
+            AND (lower("address") LIKE ${pattern} ESCAPE '\\'
+              OR lower("name") LIKE ${pattern} ESCAPE '\\'
+              OR lower("symbol") LIKE ${pattern} ESCAPE '\\')
+          ORDER BY "analysisUpdatedAt" DESC NULLS LAST, "createdAt" DESC
+          LIMIT ${SEARCH_MATCH_LIMIT + 1}
+        `;
+        searchTruncated = matches.length > SEARCH_MATCH_LIMIT;
+        baseWhere.id = { in: matches.slice(0, SEARCH_MATCH_LIMIT).map((row) => row.id) };
       }
 
       if (q.sort === "high_risk") baseWhere.overallRisk = { in: ["high_risk", "critical_risk"] };
@@ -104,6 +119,9 @@ export async function tokenRoutes(app: FastifyInstance) {
 
       return {
         total,
+        // A capped search means total counts the matches we could resolve, not
+        // every token that matches the term.
+        searchTruncated,
         items: items.map(tokenRowToSummary),
         dataHealth: await prisma.dataSourceHealth.findMany(),
       };

@@ -21,7 +21,9 @@ async function scanOne(source: typeof SOURCES[number]) {
   const key = `cctp_backfill_${source.key}`;
   const saved = await prisma.indexerCursor.findUnique({ where: { key } });
   const meta = saved?.metaJson ? JSON.parse(saved.metaJson) as { cursor?: Cursor | null; exhausted?: boolean; emptyPages?: number } : {};
-  if (meta.exhausted) return { source: source.key, matched: 0, exhausted: true };
+  // Exhaustion only counts when there is no page left. A stored flag with a
+  // cursor still on it was latched by the old low-yield rule, so resume there.
+  if (meta.exhausted && !meta.cursor) return { source: source.key, matched: 0, exhausted: true };
   const url = BLOCKSCOUT_PRO_API_KEY
     ? new URL(`https://api.blockscout.com/${source.chainId}/api/v2/addresses/${MESSENGER}/transactions`)
     : new URL(`/api/v2/addresses/${MESSENGER}/transactions`, source.explorer);
@@ -44,7 +46,10 @@ async function scanOne(source: typeof SOURCES[number]) {
   }
   const emptyPages = matched === 0 ? (meta.emptyPages ?? 0) + 1 : 0;
   const cursor = body.next_page_params ?? null;
-  const exhausted = !cursor || emptyPages >= 20;
+  // Only the end of the address history ends the backfill. A run of pages with
+  // no Arc-bound burns used to latch `exhausted`, which stopped the source for
+  // good and left the rest of the history unindexed.
+  const exhausted = !cursor;
   await prisma.indexerCursor.upsert({ where: { key }, create: { key, lastAt: new Date(), metaJson: JSON.stringify({ cursor, exhausted, emptyPages }) }, update: { lastAt: new Date(), metaJson: JSON.stringify({ cursor, exhausted, emptyPages }) } });
   return { source: source.key, matched, exhausted };
 }

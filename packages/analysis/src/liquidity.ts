@@ -41,11 +41,16 @@ export async function analyzeLiquidity(opts: {
     for (const t of transfers.items ?? []) {
       const method = (t.method ?? t.type ?? "").toLowerCase();
       const tx = t.transaction_hash;
-      const ts = t.timestamp ?? new Date().toISOString();
+      // The chain timestamp is the only honest value here. Falling back to the
+      // analysis time dated the event to when it was looked at, so an unknown
+      // time stays null; TimelineEvent.timestamp is still typed string upstream.
+      const ts = t.timestamp ?? null;
       const from = typeof t.from === "string" ? t.from : t.from?.hash;
       const to = typeof t.to === "string" ? t.to : t.to?.hash;
 
-      if (/mint|add.?liquidity/i.test(method)) {
+      // A "mint" or "burn" of the token itself is an ordinary supply change,
+      // not a pool event, so only an explicit liquidity method counts here.
+      if (/add.?liquidity/i.test(method)) {
         recentAdds.push({
           id: `add-${tx}-${i}`,
           type: "liquidity_add",
@@ -57,7 +62,7 @@ export async function analyzeLiquidity(opts: {
           addresses: [from, to].filter(Boolean) as string[],
         });
       }
-      if (/burn|remove.?liquidity/i.test(method)) {
+      if (/remove.?liquidity/i.test(method)) {
         recentRemoves.push({
           id: `rm-${tx}-${i}`,
           type: "liquidity_remove",
@@ -124,7 +129,10 @@ export async function analyzeLiquidity(opts: {
   const snapshot: LiquiditySnapshot = {
     totalUsd: null,
     pools,
-    dominantController: opts.deployer ?? null,
+    // Nothing here shows who holds the LP position. Naming the deployer would
+    // be an accusation with no evidence behind it, so the field stays unknown
+    // until a real LP holder read fills it in.
+    dominantController: null,
     dominantPct: null,
     recentAdds: recentAdds.slice(0, 20),
     recentRemoves: recentRemoves.slice(0, 20),

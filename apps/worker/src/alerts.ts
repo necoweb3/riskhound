@@ -1,9 +1,43 @@
 import { prisma, jparse, jstr } from "@rugkiller/db";
 
-export async function runAlertEngine() {
-  const watches = await prisma.watchlistItem.findMany({ take: 500 });
-  if (!watches.length) return;
+const WATCH_PAGE = 500;
 
+export async function runAlertEngine() {
+  // The same recent risk events apply to every watched wallet, so read them
+  // once and in a deterministic order instead of per watchlist row.
+  const recentEvents = await prisma.riskEvent.findMany({
+    where: { createdAt: { gte: new Date(Date.now() - 6 * 3600 * 1000) } },
+    orderBy: { createdAt: "desc" },
+    take: 50,
+  });
+
+  // Page through the whole watchlist. A bare take() with no ordering silently
+  // stopped alerting for every user past the first page.
+  let watchCursor: string | undefined;
+  for (;;) {
+    const watches = await prisma.watchlistItem.findMany({
+      orderBy: { id: "asc" },
+      take: WATCH_PAGE,
+      ...(watchCursor ? { skip: 1, cursor: { id: watchCursor } } : {}),
+    });
+    if (!watches.length) return;
+    await processWatches(watches, recentEvents);
+    if (watches.length < WATCH_PAGE) return;
+    watchCursor = watches[watches.length - 1].id;
+  }
+}
+
+type Watch = { userId: string; entityType: string; chain: string; address: string };
+type RecentEvent = {
+  id: string;
+  eventClass: string;
+  title: string;
+  detail: string | null;
+  addressesJson: string;
+  evidenceJson: string;
+};
+
+async function processWatches(watches: Watch[], recentEvents: RecentEvent[]) {
   for (const w of watches) {
     if (w.entityType === "token") {
       const token = await prisma.token.findUnique({
@@ -26,7 +60,9 @@ export async function runAlertEngine() {
           title: `Risk elevated: ${token.symbol ?? token.address.slice(0, 10)}`,
           body: `Overall risk is ${token.overallRisk}. Signals: ${jparse<string[]>(token.topSignalsJson, []).join(", ")}`,
           evidence: [{ type: "contract", chain: w.chain, value: w.address }],
-          dedupeKey: `risk-${w.userId}-${w.address}-${token.overallRisk}-${token.analysisUpdatedAt?.toISOString() ?? ""}`,
+          // Keyed on the risk state only. Including the analysis timestamp made
+          // every re-analysis of an unchanged token fire the alert again.
+          dedupeKey: `risk-${w.userId}-${w.address}-${token.overallRisk}`,
         });
       }
 
@@ -42,7 +78,9 @@ export async function runAlertEngine() {
           title: "Sell simulation failed",
           body: sim.summary,
           evidence: [{ type: "simulation", chain: w.chain, value: sim.id }],
-          dedupeKey: `sellfail-${w.userId}-${w.address}-${sim.id}`,
+          // The simulation id changes on every re-run, so key on the state it
+          // reports instead. The id stays in the evidence for the audit trail.
+          dedupeKey: `sellfail-${w.userId}-${w.address}-cannot-sell`,
         });
       }
 
@@ -63,11 +101,7 @@ export async function runAlertEngine() {
     }
 
     if (w.entityType === "wallet") {
-      const events = await prisma.riskEvent.findMany({
-        where: { createdAt: { gte: new Date(Date.now() - 6 * 3600 * 1000) } },
-        take: 50,
-      });
-      for (const e of events) {
+      for (const e of recentEvents) {
         const addrs = jparse<string[]>(e.addressesJson, []).map((x) => x.toLowerCase());
         if (!addrs.includes(w.address.toLowerCase())) continue;
         await emit({
@@ -114,7 +148,10 @@ async function emit(a: {
         dedupeKey: a.dedupeKey,
       },
     });
-  } catch {
-    // unique dedupeKey
+  } catch (e) {
+    // P2002 is the dedupeKey collision this relies on. Anything else is a real
+    // write failure and must be visible rather than dropped.
+    if ((e as { code?: string })?.code === "P2002") return;
+    console.error("[alerts] emit failed", a.dedupeKey, e instanceof Error ? e.message : e);
   }
 }

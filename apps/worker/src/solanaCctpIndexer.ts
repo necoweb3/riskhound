@@ -26,12 +26,21 @@ async function rpc(method: string, params: unknown[]) {
   return body.result;
 }
 
-async function ingest(signature: Signature) {
-  if (signature.err) return false;
+type IngestResult = "ingested" | "skipped" | "failed";
+
+async function ingest(signature: Signature): Promise<IngestResult> {
+  if (signature.err) return "skipped";
   const response = await fetch(`${IRIS}/v2/messages/5?transactionHash=${encodeURIComponent(signature.signature)}`, {
     headers: { accept: "application/json" }, signal: AbortSignal.timeout(10_000),
   });
-  if (!response.ok) return false;
+  // 404 is Circle answering that this signature carries no CCTP message, which
+  // is true of most of this program's traffic (receives, not burns). Only a
+  // failure to get an answer at all is unread; treating 404 as unread would
+  // hold the backfill cursor on the first non-burn signature forever.
+  if (response.status === 404) return "skipped";
+  // A non-OK Circle response says nothing about this signature, so it is an
+  // unread signature rather than one that can be skipped.
+  if (!response.ok) return "failed";
   const body = (await response.json()) as {
     messages?: Array<{
       status?: string;
@@ -44,7 +53,7 @@ async function ingest(signature: Signature) {
     }>;
   };
   const message = body.messages?.find((item) => item.decodedMessage?.destinationDomain === "26");
-  if (!message) return false;
+  if (!message) return "skipped";
   const decoded = message.decodedMessage;
   const recipient = normalizeArcRecipient(decoded?.decodedMessageBody?.mintRecipient);
   const amountUsdc = Number(decoded?.decodedMessageBody?.amount ?? 0) / 1_000_000;
@@ -59,9 +68,17 @@ async function ingest(signature: Signature) {
       recipientArcExplorerUrl: observedArcExplorer().addressUrl(recipient),
       observedAt: new Date((signature.blockTime ?? Math.floor(Date.now() / 1000)) * 1000),
     },
-    update: { status: message.status === "complete" ? "attestation_ready" : undefined },
+    update: {},
   });
-  return true;
+  if (message.status === "complete") {
+    // Never walk a row back from a mint that settlement verification already
+    // confirmed onchain; attestation_ready is the weaker claim of the two.
+    await prisma.bridgeTransferRow.updateMany({
+      where: { sourceTxHash: signature.signature, status: { not: "arc_mint_confirmed" } },
+      data: { status: "attestation_ready" },
+    });
+  }
+  return "ingested";
 }
 
 export async function runSolanaCctpIndexer() {
@@ -73,17 +90,29 @@ export async function runSolanaCctpIndexer() {
   ]);
   const unique = [...new Map([...recent, ...historical].map((item) => [item.signature, item])).values()];
   let matched = 0;
-  for (const signature of unique) if (await ingest(signature)) matched++;
-  const nextBefore = historical.at(-1)?.signature ?? before ?? null;
+  const unread = new Set<string>();
+  for (const signature of unique) {
+    const result = await ingest(signature);
+    if (result === "ingested") matched++;
+    else if (result === "failed") unread.add(signature.signature);
+  }
+  // Moving `before` past a signature Circle would not answer for drops it from
+  // the backfill permanently, so hold the cursor until the page reads cleanly.
+  const historyIncomplete = historical.some((item) => unread.has(item.signature));
+  const nextBefore = historyIncomplete ? before ?? null : historical.at(-1)?.signature ?? before ?? null;
   await prisma.indexerCursor.upsert({
     where: { key: "solana_cctp_backfill" },
     create: { key: "solana_cctp_backfill", lastAt: new Date(), metaJson: JSON.stringify({ before: nextBefore }) },
     update: { lastAt: new Date(), metaJson: JSON.stringify({ before: nextBefore }) },
   });
+  // Signatures Circle would not answer for are burns we cannot see, so a run
+  // holding any of them is not a clean pass over the source.
+  const healthy = unread.size === 0;
+  const lastError = healthy ? null : `${unread.size} of ${unique.length} signatures could not be read from Circle.`;
   await prisma.dataSourceHealth.upsert({
     where: { key: "solana_cctp" },
-    create: { key: "solana_cctp", name: "Solana CCTP V2", healthy: true, lastSuccessAt: new Date(), metaJson: JSON.stringify({ checked: unique.length, matched }) },
-    update: { healthy: true, lastSuccessAt: new Date(), lastError: null, metaJson: JSON.stringify({ checked: unique.length, matched }) },
+    create: { key: "solana_cctp", name: "Solana CCTP V2", healthy, lastSuccessAt: healthy ? new Date() : null, lastError, metaJson: JSON.stringify({ checked: unique.length, matched, unread: unread.size }) },
+    update: { healthy, lastSuccessAt: healthy ? new Date() : undefined, lastError, metaJson: JSON.stringify({ checked: unique.length, matched, unread: unread.size }) },
   });
-  return { checked: unique.length, matched };
+  return { checked: unique.length, matched, unread: unread.size };
 }

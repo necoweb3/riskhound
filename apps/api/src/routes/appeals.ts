@@ -4,13 +4,17 @@ import { prisma, jstr } from "@rugkiller/db";
 import { normalizeAddress } from "@rugkiller/chain";
 import { authenticatedAddress } from "../services/auth.js";
 
+/** An appeal can only point at a chain RiskHound indexes. */
+const APPEALABLE_CHAINS = ["arc_testnet", "arc_observed_5042", "robinhood"] as const;
+
 export async function appealRoutes(app: FastifyInstance) {
   app.post("/appeals", async (req, reply) => {
     const body = z
       .object({
         entityType: z.enum(["token", "wallet", "event"]),
-        chain: z.string(),
-        address: z.string(),
+        chain: z.enum(APPEALABLE_CHAINS),
+        // Event appeals store the raw value, so it stays bounded.
+        address: z.string().min(1).max(128),
         findingId: z.string().optional(),
         explanation: z.string().min(10).max(5000),
         evidenceUrls: z.array(z.string().url()).max(10).default([]),
