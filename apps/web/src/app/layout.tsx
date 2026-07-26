@@ -1,6 +1,9 @@
 import type { Metadata, Viewport } from "next";
 import Link from "next/link";
 import { Nav } from "@/components/Nav";
+import { THEME_INIT_SCRIPT } from "@/components/ThemeToggle";
+import { StatusBar } from "@/components/StatusBar";
+import { ScrollChrome } from "@/components/ScrollChrome";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -13,20 +16,36 @@ export const metadata: Metadata = {
   },
 };
 
-export const viewport: Viewport = { themeColor: "#f6f6f7" };
+// Media-query themeColor keeps the mobile browser chrome in sync with the theme.
+export const viewport: Viewport = {
+  themeColor: [
+    { media: "(prefers-color-scheme: light)", color: "#fbfbfc" },
+    { media: "(prefers-color-scheme: dark)", color: "#08090a" },
+  ],
+};
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" suppressHydrationWarning>
+      <head>
+        {/* Runs before first paint so the stored theme never flashes. */}
+        <script dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
+      </head>
       <body>
-        <a className="rk-skip" href="#main-content">Skip to content</a>
+        <a className="rk-skip" href="#main-content">
+          Skip to content
+        </a>
         <div className="rk-shell">
+          <StatusBar />
           <Nav />
-          <main className="rk-main" id="main-content">{children}</main>
+          <ScrollChrome />
+          <main className="rk-main" id="main-content">
+            {children}
+          </main>
           <footer className="rk-footer">
             <div className="rk-footer__inner">
               <p>
-                RiskHound is built on Arc. Arc™ is a trademark of Circle. Not financial advice.{" "}
+                Built on Arc. Arc&trade; is a trademark of Circle. Not financial advice.{" "}
                 <a
                   className="rk-footer__credit"
                   href="https://x.com/necoweb3"
