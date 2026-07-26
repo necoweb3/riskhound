@@ -37,8 +37,10 @@
 
   --text: #15161a;
   --text-2: #54565e;
-  --text-3: #81838c;
-  --text-4: #a9abb2;
+  /* Both tiers carry real text (micro labels, counts, captions), so both
+     clear 4.5:1 on --bg. They were 3.65:1 and 2.22:1. */
+  --text-3: #66686f;
+  --text-4: #6f717a;
   --invert: #fbfbfc;
   --white: #ffffff;
 
@@ -77,8 +79,8 @@ html[data-theme="dark"] {
 
   --text: #f1f2f4;
   --text-2: #9da2ac;
-  --text-3: #767b85;
-  --text-4: #575c65;
+  --text-3: #868b95;
+  --text-4: #787d86;
   --invert: #0a0b0d;
   --white: #ffffff;
 
@@ -118,8 +120,8 @@ html[data-theme="dark"] {
     --grid: rgba(255, 255, 255, 0.04);
     --text: #f1f2f4;
     --text-2: #9da2ac;
-    --text-3: #767b85;
-    --text-4: #575c65;
+    --text-3: #868b95;
+    --text-4: #787d86;
     --invert: #0a0b0d;
     --solid: #f1f2f4;
     --solid-tx: #0a0b0d;
@@ -745,6 +747,14 @@ summary:focus-visible {
   height: 40px;
   padding: 0 16px;
   font-size: 13.5px;
+}
+
+/* 28px is a comfortable pointer target and a poor finger one. Coarse pointers
+   get a larger hit area without changing the desktop density. */
+@media (pointer: coarse) {
+  .rk-btn--sm { height: 34px; padding: 0 12px; }
+  .rk-btn { min-height: 38px; }
+  .rk-nav__toggle, .rk-palette__trigger { min-height: 38px; }
 }
 .rk-btn--block {
   width: 100%;

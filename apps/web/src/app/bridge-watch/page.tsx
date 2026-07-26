@@ -9,12 +9,14 @@ type BridgeWatch = {
   sample: { scanned: number; arcTransfers: number; waitingTransfers: number; waitingUsdc: number; limitation: string };
   indexedHistory: { transfers: number; committedUsdc: number; limitation: string; statuses: Record<string, { transfers: number; usdc: number }> };
   landed: { usdc: number | null; source: string; live: boolean };
-  transfers: Array<{ sourceChain: string; sourceTxHash: string; sender: string; recipient: string; amountUsdc: number; observedAt: string; status: "waiting_for_circle" | "attestation_ready" | "status_unavailable"; statusDetail: string; sourceExplorerUrl: string; recipientArcExplorerUrl: string; priority: "standard" | "high_value" }>;
-  trackedWallets: Array<{ address: string; committedUsdc: number; lastSeenAt: string; arcExplorerUrl: string; positions: Position[]; activity: Activity[] }>;
+  transfers: Array<{ sourceChain: string; sourceTxHash: string; sender: string; recipient: string; amountUsdc: number; observedAt: string; status: "waiting_for_circle" | "attestation_ready" | "status_unavailable"; statusDetail: string; sourceExplorerUrl: string; recipientArcExplorerUrl: string | null; priority: "standard" | "high_value" }>;
+  trackedWallets: Array<{ address: string; committedUsdc: number; lastSeenAt: string; arcExplorerUrl: string | null; positions: Position[]; activity: Activity[] }>;
   supplyIntelligence: { recentDirectMints: Array<{ txHash: string; observedAt: string; minter: string; recipient: string; amountUsdc: number; classification: string; explorerUrl: string }>; recentDirectMintUsdc: number; classificationNote: string };
   reconciliation: { anomalies: Array<{ sourceTxHash: string; arcTxHash: string; amountUsdc: number; circleStatus: string; arcConfirmed: boolean; classification: string; detail: string; sourceExplorerUrl: string; arcExplorerUrl: string }> };
   liquidityPressure: { tokenCount: number; usdcSupply: number | null; usdcPerIndexedToken: number | null; measuredDexLiquidityUsd: number | null; tokensWithMeasuredLiquidity: number; coverageComplete: boolean; note: string };
-  systemMintRecipients: Array<{ address: string; mintedUsdc: number; lastMintAt: string; disclosure: string; arcExplorerUrl: string; positions: Position[]; activity: Activity[] }>;
+  systemMintRecipients: Array<{ address: string; mintedUsdc: number; lastMintAt: string; disclosure: string; arcExplorerUrl: string | null; positions: Position[]; activity: Activity[] }>;
+  /** Null when chain 5042 has no explorer, which is what gates the Arc-side figures. */
+  evidence?: { observedArcExplorer: string | null };
   refreshedAt: string;
 };
 
@@ -32,6 +34,8 @@ export default async function BridgeWatchPage() {
   try { data = await apiGet<BridgeWatch>("/bridge-watch"); }
   catch (cause) { error = cause instanceof Error ? cause.message : "Could not load bridge activity."; }
 
+  const arcExplorer = Boolean(data?.evidence?.observedArcExplorer);
+
   return <div className="rk-stack-lg rk-bridge-page">
     <header className="rk-bridge-hero">
       <p className="rk-eyebrow">READ-ONLY INTELLIGENCE</p>
@@ -43,12 +47,38 @@ export default async function BridgeWatchPage() {
     {data && <>
       <div className="rk-card rk-bridge-disclosure"><strong>Observed infrastructure, not a launch announcement.</strong><span className="rk-faint">{data.network.disclosure}</span></div>
 
+      {/* Measured first. Three headline tiles reading "Unavailable" made a page
+          full of real burn data look broken. */}
       <section className="rk-grid-3">
-        <div className="rk-card"><span className="rk-eyebrow">USDC ON ARC</span><strong className="rk-metric">{data.landed.usdc == null ? "Unavailable" : amount(data.landed.usdc)}</strong><span className="rk-faint">live observed supply</span></div>
+        <div className="rk-card"><span className="rk-eyebrow">PERSISTENT BURN INDEX</span><strong className="rk-metric">{amount(data.indexedHistory.committedUsdc)}</strong><span className="rk-faint">USDC across {amount(data.indexedHistory.transfers)} stored burns</span></div>
+        <div className="rk-card"><span className="rk-eyebrow">RECENT WAITING</span><strong className="rk-metric">{amount(data.sample.waitingUsdc, 2)}</strong><span className="rk-faint">USDC in the rolling source sample</span></div>
         <div className="rk-card"><span className="rk-eyebrow">INDEXED TOKENS</span><strong className="rk-metric">{amount(data.liquidityPressure.tokenCount)}</strong><span className="rk-faint">observed token contracts</span></div>
-        <div className="rk-card"><span className="rk-eyebrow">USDC PER TOKEN</span><strong className="rk-metric">{data.liquidityPressure.usdcPerIndexedToken == null ? "Unavailable" : amount(data.liquidityPressure.usdcPerIndexedToken)}</strong><span className="rk-faint">supply ratio, not liquidity</span></div>
       </section>
 
+      {/* Everything below needs an index on chain 5042. Saying why once beats
+          repeating "Unavailable" with no cause attached. */}
+      {!arcExplorer && (
+        <section className="rk-card rk-stack">
+          <div>
+            <span className="rk-eyebrow">NOT MEASURED</span>
+            <h2 className="rk-section-title">Arc-side figures need an explorer</h2>
+          </div>
+          <p className="rk-faint rk-zero">
+            Chain 5042 has no public explorer at the moment. Source burns, Circle attestation state
+            and the persistent index above are read from Base and Circle and are unaffected. Total
+            USDC supply on Arc, supply per indexed token, verified DEX liquidity and the direct-mint
+            feed all need an index on Arc itself, so they are reported as unknown rather than zero.
+          </p>
+          <div className="rk-row">
+            <span className="rk-chip">USDC on Arc</span>
+            <span className="rk-chip">USDC per token</span>
+            <span className="rk-chip">Verified DEX liquidity</span>
+            <span className="rk-chip">Direct mints</span>
+          </div>
+        </section>
+      )}
+
+      {(arcExplorer || data.supplyIntelligence.recentDirectMints.length > 0) && (
       <section className="rk-card rk-stack">
         <div className="rk-between"><div><span className="rk-eyebrow">USDC SUPPLY INTELLIGENCE</span><h2 className="rk-section-title">Recent direct mints</h2></div><strong>{amount(data.supplyIntelligence.recentDirectMintUsdc, 2)} USDC</strong></div>
         <p className="rk-faint rk-zero">{data.supplyIntelligence.classificationNote}</p>
@@ -61,11 +91,12 @@ export default async function BridgeWatchPage() {
           </tr>)}
         </tbody></table></div>
       </section>
+      )}
 
       <section className="rk-grid-3">
-        <div className="rk-card"><span className="rk-eyebrow">VERIFIED DEX LIQUIDITY</span><strong className="rk-metric">{data.liquidityPressure.measuredDexLiquidityUsd == null ? "Unavailable" : `$${amount(data.liquidityPressure.measuredDexLiquidityUsd)}`}</strong><span className="rk-faint">{data.liquidityPressure.note}</span></div>
-        <div className="rk-card"><span className="rk-eyebrow">RECENT WAITING</span><strong className="rk-metric">{amount(data.sample.waitingUsdc, 2)}</strong><span className="rk-faint">USDC in the rolling source sample</span></div>
-        <div className="rk-card"><span className="rk-eyebrow">PERSISTENT BURN INDEX</span><strong className="rk-metric">{amount(data.indexedHistory.committedUsdc)}</strong><span className="rk-faint">USDC across {amount(data.indexedHistory.transfers)} stored burns</span></div>
+        <div className="rk-card"><span className="rk-eyebrow">VERIFIED DEX LIQUIDITY</span><strong className="rk-metric">{data.liquidityPressure.measuredDexLiquidityUsd == null ? "Not measured" : `$${amount(data.liquidityPressure.measuredDexLiquidityUsd)}`}</strong><span className="rk-faint">{data.liquidityPressure.note}</span></div>
+        <div className="rk-card"><span className="rk-eyebrow">USDC ON ARC</span><strong className="rk-metric">{data.landed.usdc == null ? "Not measured" : amount(data.landed.usdc)}</strong><span className="rk-faint">{data.landed.source}</span></div>
+        <div className="rk-card"><span className="rk-eyebrow">USDC PER TOKEN</span><strong className="rk-metric">{data.liquidityPressure.usdcPerIndexedToken == null ? "Not measured" : amount(data.liquidityPressure.usdcPerIndexedToken)}</strong><span className="rk-faint">supply ratio, not liquidity</span></div>
       </section>
 
       <section className="rk-card rk-stack">
@@ -81,7 +112,7 @@ export default async function BridgeWatchPage() {
         <div className="rk-between"><div><span className="rk-eyebrow">LIVE SOURCE EVIDENCE</span><h2 className="rk-section-title">Recent Arc-targeted burns</h2></div><span className="rk-faint">Updated {timeAgo(data.refreshedAt)}</span></div>
         <div className="rk-bridge-list">{data.transfers.map((transfer) => <article className="rk-bridge-row" key={transfer.sourceTxHash}>
           <div><div className="rk-inline"><strong>{amount(transfer.amountUsdc, 2)} USDC</strong><span className={transfer.status === "attestation_ready" ? "rk-badge rk-badge--ok" : "rk-badge rk-badge--caution"}>{statusLabel(transfer.status)}</span>{transfer.priority === "high_value" && <span className="rk-badge rk-badge--high">High value</span>}</div><p className="rk-faint rk-compact">{transfer.statusDetail}</p><span className="rk-mono">{transfer.sourceChain} / {shortAddr(transfer.sender)} to {shortAddr(transfer.recipient)}</span></div>
-          <div className="rk-bridge-row__actions"><span className="rk-faint">{timeAgo(transfer.observedAt)}</span><a className="rk-btn rk-btn--sm" href={transfer.sourceExplorerUrl} target="_blank" rel="noreferrer">Burn proof</a><a className="rk-btn rk-btn--sm" href={transfer.recipientArcExplorerUrl} target="_blank" rel="noreferrer">Arc wallet</a></div>
+          <div className="rk-bridge-row__actions"><span className="rk-faint">{timeAgo(transfer.observedAt)}</span><a className="rk-btn rk-btn--sm" href={transfer.sourceExplorerUrl} target="_blank" rel="noreferrer">Burn proof</a>{transfer.recipientArcExplorerUrl && <a className="rk-btn rk-btn--sm" href={transfer.recipientArcExplorerUrl} target="_blank" rel="noreferrer">Arc wallet</a>}</div>
         </article>)}</div>
       </section>
 
@@ -89,7 +120,7 @@ export default async function BridgeWatchPage() {
         <div><span className="rk-eyebrow">SYSTEM MINT RECIPIENTS</span><h2 className="rk-section-title">Large balances under observation</h2><p className="rk-faint rk-zero">Follow-on pool, token and routing activity is monitored. Inclusion is not an accusation.</p></div>
         <div className="rk-bridge-list">{data.systemMintRecipients.map((wallet) => <article className="rk-bridge-row" key={wallet.address}>
           <div><strong>{amount(wallet.mintedUsdc, 2)} USDC minted</strong><div className="rk-mono rk-faint rk-compact">{wallet.address}</div><p className="rk-faint rk-compact">{wallet.disclosure}</p>{wallet.positions.length > 0 && <div className="rk-inline">{wallet.positions.map((position) => <a className="rk-chip" key={position.address} href={`/mainnet/token/${position.address}`}>{position.symbol || position.name}</a>)}</div>}</div>
-          <div className="rk-bridge-row__actions"><span className="rk-faint">Last mint {timeAgo(wallet.lastMintAt)}</span><a className="rk-btn rk-btn--sm" href={wallet.arcExplorerUrl} target="_blank" rel="noreferrer">Wallet evidence</a></div>
+          <div className="rk-bridge-row__actions"><span className="rk-faint">Last mint {timeAgo(wallet.lastMintAt)}</span>{wallet.arcExplorerUrl && <a className="rk-btn rk-btn--sm" href={wallet.arcExplorerUrl} target="_blank" rel="noreferrer">Wallet evidence</a>}</div>
         </article>)}</div>
       </section>
 
