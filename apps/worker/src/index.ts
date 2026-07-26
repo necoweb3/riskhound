@@ -10,6 +10,7 @@ import { runObservedMainnetIndexer } from "./observedMainnetIndexer.js";
 import { runBridgeSettlementIndexer } from "./bridgeSettlementIndexer.js";
 import { runSolanaCctpIndexer } from "./solanaCctpIndexer.js";
 import { runEvmCctpBackfill } from "./evmCctpBackfill.js";
+import { runObservedArcHolderIndexer } from "./observedArcHolderIndexer.js";
 
 const redisUrl = process.env.REDIS_URL ?? "redis://localhost:6379";
 const redisOptional = process.env.REDIS_OPTIONAL !== "false";
@@ -195,6 +196,12 @@ async function main() {
 
   await loop("evm-cctp-backfill", evmCctpBackfillPoll, async () => {
     await runEvmCctpBackfill();
+  });
+
+  // Chain 5042 has no explorer, so holders and creators are rebuilt from the
+  // node instead. Slow on purpose: it is a backfill, not a live feed.
+  await loop("observed-arc-holders", Number(process.env.OBSERVED_ARC_HOLDER_POLL_MS ?? 120_000), async () => {
+    await runObservedArcHolderIndexer();
   });
 
   await loop("alerts", 20_000, async () => {
