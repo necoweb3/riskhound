@@ -275,23 +275,41 @@ export async function runObservedArcHolderIndexer() {
     }
   }
 
-  const failed = results.filter((r) => (r as { error?: string }).error).length;
+  const errors = results
+    .map((r) => (r as { address?: string; error?: string }))
+    .filter((r) => r.error);
+  const skipped = results
+    .map((r) => (r as { address?: string; skipped?: string }))
+    .filter((r) => r.skipped);
+  const failed = errors.length;
+
+  // A count alone cannot be acted on. "3 of 3 failed" told us nothing about
+  // why, so the reasons are stored with it.
+  const summary = failed
+    ? `${failed} of ${tokens.length} tokens failed: ${errors
+        .slice(0, 3)
+        .map((e) => `${e.address?.slice(0, 10)}: ${e.error?.slice(0, 120)}`)
+        .join(" | ")}`
+    : null;
+
   await prisma.dataSourceHealth.upsert({
     where: { key: "observed_arc_holders" },
     create: {
       key: "observed_arc_holders",
       name: "Observed Arc holder index (RPC)",
       healthy: failed < tokens.length,
-      lastSuccessAt: new Date(),
+      lastSuccessAt: failed < tokens.length ? new Date() : null,
       lastBlock: BigInt(head),
-      metaJson: JSON.stringify({ processed: tokens.length, failed }),
+      lastError: summary,
+      metaJson: JSON.stringify({ processed: tokens.length, failed, skipped: skipped.map((s) => s.skipped) }),
     },
     update: {
       healthy: failed < tokens.length,
-      lastSuccessAt: new Date(),
+      // Only a run that indexed something may refresh the success timestamp.
+      lastSuccessAt: failed < tokens.length ? new Date() : undefined,
       lastBlock: BigInt(head),
-      lastError: failed ? `${failed} of ${tokens.length} tokens failed` : null,
-      metaJson: JSON.stringify({ processed: tokens.length, failed }),
+      lastError: summary,
+      metaJson: JSON.stringify({ processed: tokens.length, failed, skipped: skipped.map((s) => s.skipped) }),
     },
   });
 
