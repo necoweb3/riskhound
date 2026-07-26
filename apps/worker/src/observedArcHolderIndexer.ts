@@ -127,6 +127,35 @@ async function scanTransfers(token: string, fromBlock: number, toBlock: number) 
   return { deltas, logCount, scannedTo };
 }
 
+/**
+ * Apply a scan's deltas to the balances carried over from earlier scans.
+ *
+ * `carryOver` must be empty when the scan started at the deploy block, because
+ * such a scan already contains the whole history. Folding it onto stored
+ * balances counts every transfer twice, which is what previously made a
+ * mismatched token unable to recover.
+ */
+export function foldBalances(
+  carryOver: Iterable<[string, bigint]>,
+  deltas: Iterable<[string, bigint]>
+): Map<string, bigint> {
+  const balances = new Map<string, bigint>(carryOver);
+  for (const [addr, delta] of deltas) {
+    balances.set(addr, (balances.get(addr) ?? 0n) + delta);
+  }
+  // The zero address is the mint and burn counterparty, not a holder.
+  balances.delete(ZERO);
+  return balances;
+}
+
+/** Positive balances, largest first. A stable order for equal balances. */
+export function rankHolders(balances: Map<string, bigint>): [string, bigint][] {
+  return [...balances.entries()]
+    .filter(([, v]) => v > 0n)
+    .sort((a, b) => (b[1] > a[1] ? 1 : b[1] < a[1] ? -1 : a[0] < b[0] ? -1 : 1));
+}
+
+
 async function indexToken(row: {
   id: string;
   address: string;
@@ -155,7 +184,7 @@ async function indexToken(row: {
   // so folding it onto stored balances would count every transfer twice. That
   // is what made a mismatched token stay mismatched forever: the reset cursor
   // forced a full rescan while its old rows were still there.
-  const balances = new Map<string, bigint>();
+  const carryOver: [string, bigint][] = [];
   if (lastScanned > 0) {
     const existing = await prisma.tokenHolder.findMany({
       where: { tokenId: row.id },
@@ -163,20 +192,14 @@ async function indexToken(row: {
     });
     for (const h of existing) {
       try {
-        balances.set(h.address, BigInt(h.balance));
+        carryOver.push([h.address, BigInt(h.balance)]);
       } catch {
         /* a corrupt row is rebuilt from the deltas */
       }
     }
   }
-  for (const [addr, delta] of deltas) {
-    balances.set(addr, (balances.get(addr) ?? 0n) + delta);
-  }
-  balances.delete(ZERO);
 
-  let holders = [...balances.entries()]
-    .filter(([, v]) => v > 0n)
-    .sort((a, b) => (b[1] > a[1] ? 1 : b[1] < a[1] ? -1 : 0));
+  let holders = rankHolders(foldBalances(carryOver, deltas));
 
   // Check the reconstruction against the contract itself.
   let verified = true;
