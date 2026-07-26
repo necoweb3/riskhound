@@ -86,6 +86,8 @@ function assessObservedRisk(opts: {
  * past the proxy's limit and the request would die with no response at all.
  */
 const RPC_READ_BUDGET_MS = Number(process.env.OBSERVED_ARC_READ_BUDGET_MS ?? 20_000);
+/** Each call gets its own deadline so one slow one cannot eat the whole budget. */
+const PER_CALL_BUDGET_MS = Number(process.env.OBSERVED_ARC_CALL_BUDGET_MS ?? 9_000);
 
 function withBudget<T>(work: Promise<T>, fallback: T, ms = RPC_READ_BUDGET_MS): Promise<T> {
   return Promise.race([
@@ -116,16 +118,36 @@ async function readContractOverRpcUnbounded(address: `0x${string}`) {
   if (!rpc) return { ...empty, error: "no rpc configured" };
 
   // None of these three depend on each other, and running them in sequence
-  // stacked three round trips against a public endpoint, which is what pushed
-  // the read past its budget in production.
-  const [probe, blockNumber, meta] = await Promise.all([
-    probeCode(rpc, address),
-    rpc.getBlockNumber().then((b) => b.toString()).catch(() => null),
-    readErc20Meta(rpc, address).catch(() => null),
+  // stacked three round trips against a public endpoint. They also fail
+  // independently: a throttled metadata read should not cost us the bytecode
+  // we already have, so each carries its own deadline and its own outcome.
+  const call = <T>(work: Promise<T>, label: string) =>
+    Promise.race([
+      work.then((value) => ({ value, error: null as string | null })),
+      new Promise<{ value: null; error: string }>((resolve) =>
+        setTimeout(() => resolve({ value: null, error: `${label} timed out` }), PER_CALL_BUDGET_MS).unref?.()
+      ),
+    ]).catch((e) => ({
+      value: null,
+      error: `${label}: ${(e instanceof Error ? e.message : String(e)).slice(0, 160)}`,
+    }));
+
+  const [codeRes, blockRes, metaRes] = await Promise.all([
+    call(probeCode(rpc, address), "getCode"),
+    call(rpc.getBlockNumber().then((b) => b.toString()), "getBlockNumber"),
+    call(readErc20Meta(rpc, address), "erc20Meta"),
   ]);
 
-  // A silent fall back to cache is undebuggable, so the reason travels with it.
-  if (!probe.ok) return { ...empty, blockNumber, error: probe.error.slice(0, 300) };
+  const blockNumber = blockRes.value;
+  const meta = metaRes.value;
+  const probe = codeRes.value;
+  // A silent fall back to cache is undebuggable, so every reason travels back.
+  const failures = [codeRes.error, blockRes.error, metaRes.error].filter(Boolean).join("; ");
+
+  if (!probe || !probe.ok) {
+    const why = probe && !probe.ok ? probe.error.slice(0, 200) : failures || "getCode returned nothing";
+    return { ...empty, blockNumber, error: why };
+  }
 
   const code = probe.code;
   if (!code) {
@@ -162,7 +184,8 @@ async function readContractOverRpcUnbounded(address: `0x${string}`) {
     reachable: true,
     hasCode: true,
     blockNumber,
-    error: null,
+    // Bytecode answered, so the read is usable even if metadata did not.
+    error: failures || null,
     bytecodeHash: bytecodeHash(code),
     isProxy: proxy.isProxy,
     proxyReasons: proxy.reasons,

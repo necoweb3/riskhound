@@ -84,10 +84,7 @@ export function createRpcClient(network: NetworkConfig): PublicClient | null {
     transport: fallback(
       [network.rpcUrl, ...(network.rpcFallbackUrls ?? [])]
         .filter(Boolean)
-        // Reading ERC-20 metadata fires six calls at once. Batching folds them
-        // into a single HTTP request, which matters most against a public
-        // endpoint where each round trip is the expensive part.
-        .map((url) => http(url, { timeout: 20_000, retryCount: 1, batch: { wait: 8 } })),
+        .map((url) => http(url, { timeout: 20_000, retryCount: 1 })),
       { rank: false }
     ),
   }) as PublicClient;
