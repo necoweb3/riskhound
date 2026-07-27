@@ -28,10 +28,15 @@ export default function AdminPage() {
   async function load() {
     setError("");
     try {
-      setHealth(await adminGet<Record<string, unknown>>("/admin/health"));
-      const ev = await adminGet<{ items?: { id: string; title: string; manualStatus: string }[] }>("/admin/events/review");
+      // None of the three feeds another, so the review queue must not wait
+      // behind the health blob's six database queries.
+      const [h, ev, ap] = await Promise.all([
+        adminGet<Record<string, unknown>>("/admin/health"),
+        adminGet<{ items?: { id: string; title: string; manualStatus: string }[] }>("/admin/events/review"),
+        adminGet<{ items?: { id: string; address: string; status: string; explanation: string }[] }>("/admin/appeals"),
+      ]);
+      setHealth(h);
       setEvents(ev.items ?? []);
-      const ap = await adminGet<{ items?: { id: string; address: string; status: string; explanation: string }[] }>("/admin/appeals");
       setAppeals(ap.items ?? []);
     } catch (e) {
       // Drop whatever was on screen: unreadable is not the same as none.

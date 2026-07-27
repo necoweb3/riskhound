@@ -41,6 +41,43 @@ describe("buildDeployerProfile", () => {
     expect(profile.historyLabel).toBe("established");
   });
 
+  it("does not name a funder from a truncated transaction page", async () => {
+    const self = "0x1111111111111111111111111111111111111111";
+    const profile = await buildDeployerProfile({
+      chain: "arc_testnet",
+      address: self,
+      explorer: explorerWith(
+        [
+          {
+            hash: "0xa",
+            timestamp: RECENT,
+            from: { hash: "0x2222222222222222222222222222222222222222" },
+            to: { hash: self },
+          },
+        ],
+        { block_number: 100, index: 3 }
+      ),
+    });
+
+    // The oldest inbound row on page one is a recent counterparty, and the
+    // funding graph draws firstFunder as a "strong" first-funder edge.
+    expect(profile.firstFunder).toBeNull();
+  });
+
+  it("names the funder once the transaction list is exhausted", async () => {
+    const self = "0x1111111111111111111111111111111111111111";
+    const funder = "0x2222222222222222222222222222222222222222";
+    const profile = await buildDeployerProfile({
+      chain: "arc_testnet",
+      address: self,
+      explorer: explorerWith([
+        { hash: "0xa", timestamp: RECENT, from: { hash: funder }, to: { hash: self } },
+      ]),
+    });
+
+    expect(profile.firstFunder).toBe(funder);
+  });
+
   it("reports unknown history when the transaction list could not be read", async () => {
     const explorer = {
       getAddressTransactions: async () => {

@@ -273,6 +273,9 @@ async function reconciliationAnomalies() {
 let cache: { expiresAt: number; value: Awaited<ReturnType<typeof loadBridgeWatch>> } | null = null;
 /** One refresh fans out around a hundred external calls, so callers share it. */
 let inFlight: Promise<Awaited<ReturnType<typeof loadBridgeWatch>>> | null = null;
+/** A failed refresh used to be retried by every single request that followed. */
+const FAILURE_BACKOFF_MS = 30_000;
+let refreshBlockedUntil = 0;
 
 function parameter(tx: BaseTransaction, name: string): string | null {
   const value = tx.decoded_input?.parameters?.find((item) => item.name === name)?.value;
@@ -343,6 +346,17 @@ const ZERO_TOPIC = "0x0000000000000000000000000000000000000000000000000000000000
 /** The provider caps a log query at 1000 blocks. */
 const ARC_LOG_WINDOW = 1000;
 const ARC_MINT_LOOKBACK = Number(process.env.OBSERVED_ARC_MINT_LOOKBACK_BLOCKS ?? 20_000);
+/**
+ * Windows do not depend on each other, but the endpoint throttles a burst. This
+ * is the batch loop's step, so a zero or unparsable override would stall or
+ * silently skip the scan instead of just widening it.
+ */
+const ARC_LOG_CONCURRENCY = (() => {
+  const configured = Number(process.env.OBSERVED_ARC_LOG_CONCURRENCY ?? 5);
+  return Number.isFinite(configured) && configured >= 1 ? Math.floor(configured) : 5;
+})();
+
+type ArcLog = { topics: string[]; data: string; blockNumber: string; transactionHash: string };
 
 async function arcRpc<T>(method: string, params: unknown[], timeoutMs = 8_000): Promise<T | null> {
   try {
@@ -378,32 +392,43 @@ async function arcRecentMints() {
   if (!Number.isFinite(head) || head <= 0) return null;
   const from = Math.max(0, head - ARC_MINT_LOOKBACK);
 
-  const mints: { txHash: string; block: number; recipient: string; amountUsdc: number }[] = [];
+  const windows: { start: number; end: number }[] = [];
   for (let start = from; start <= head; start += ARC_LOG_WINDOW) {
-    const end = Math.min(start + ARC_LOG_WINDOW - 1, head);
-    const logs = await arcRpc<{ topics: string[]; data: string; blockNumber: string; transactionHash: string }[]>(
-      "eth_getLogs",
-      [{
-        address: ARC_USDC,
-        topics: [TRANSFER_TOPIC, ZERO_TOPIC],
-        fromBlock: `0x${start.toString(16)}`,
-        toBlock: `0x${end.toString(16)}`,
-      }]
+    windows.push({ start, end: Math.min(start + ARC_LOG_WINDOW - 1, head) });
+  }
+
+  const mints: { txHash: string; block: number; recipient: string; amountUsdc: number }[] = [];
+  // Reading the windows one after another put the whole lookback in serial in
+  // front of every refresh, and the client gave up before it finished. Batches
+  // are folded back in window order so the newest-first slice below is the
+  // same set the sequential scan produced.
+  for (let i = 0; i < windows.length; i += ARC_LOG_CONCURRENCY) {
+    const batch = await Promise.all(
+      windows.slice(i, i + ARC_LOG_CONCURRENCY).map((window) =>
+        arcRpc<ArcLog[]>("eth_getLogs", [{
+          address: ARC_USDC,
+          topics: [TRANSFER_TOPIC, ZERO_TOPIC],
+          fromBlock: `0x${window.start.toString(16)}`,
+          toBlock: `0x${window.end.toString(16)}`,
+        }])
+      )
     );
-    // A window that failed is not a window with no mints, so stop rather than
-    // report a partial scan as the recent total.
-    if (logs == null) return null;
-    for (const log of logs) {
-      if (log.topics.length < 3) continue;
-      try {
-        mints.push({
-          txHash: log.transactionHash,
-          block: Number(BigInt(log.blockNumber)),
-          recipient: `0x${log.topics[2].slice(26)}`.toLowerCase(),
-          amountUsdc: Number(BigInt(log.data === "0x" ? "0x0" : log.data)) / 1_000_000,
-        });
-      } catch {
-        /* a malformed log is skipped, not counted as zero */
+    for (const logs of batch) {
+      // A window that failed is not a window with no mints, so stop rather than
+      // report a partial scan as the recent total.
+      if (logs == null) return null;
+      for (const log of logs) {
+        if (log.topics.length < 3) continue;
+        try {
+          mints.push({
+            txHash: log.transactionHash,
+            block: Number(BigInt(log.blockNumber)),
+            recipient: `0x${log.topics[2].slice(26)}`.toLowerCase(),
+            amountUsdc: Number(BigInt(log.data === "0x" ? "0x0" : log.data)) / 1_000_000,
+          });
+        } catch {
+          /* a malformed log is skipped, not counted as zero */
+        }
       }
     }
   }
@@ -517,8 +542,8 @@ async function loadBridgeWatch() {
   );
 
   await Promise.all(
-    transfers.map((transfer) =>
-      prisma.bridgeTransferRow.upsert({
+    transfers.map(async (transfer) => {
+      await prisma.bridgeTransferRow.upsert({
         where: { sourceTxHash: transfer.sourceTxHash },
         create: {
           sourceChain: transfer.sourceChain,
@@ -533,13 +558,18 @@ async function loadBridgeWatch() {
           recipientArcExplorerUrl: transfer.recipientArcExplorerUrl,
           observedAt: new Date(transfer.observedAt),
         },
-        update: {
-          status: transfer.status,
-          statusDetail: transfer.statusDetail,
-          recipient: transfer.recipient,
-        },
-      })
-    )
+        update: { recipient: transfer.recipient },
+      });
+      // A refresh that could not reach Circle knows nothing about the transfer,
+      // so it must not replace a status that was read from a real answer.
+      if (transfer.status === "status_unavailable") return;
+      // Never walk a row back from a mint that settlement verification already
+      // confirmed onchain; nothing this feed can observe is stronger than that.
+      await prisma.bridgeTransferRow.updateMany({
+        where: { sourceTxHash: transfer.sourceTxHash, status: { not: "arc_mint_confirmed" } },
+        data: { status: transfer.status, statusDetail: transfer.statusDetail },
+      });
+    })
   );
 
   const [historicalRows, historicalAggregate, statusGroups] = await Promise.all([
@@ -712,19 +742,45 @@ async function loadBridgeWatch() {
   };
 }
 
+function startRefresh() {
+  // Concurrent callers share one refresh rather than each starting their own.
+  if (inFlight) return inFlight;
+  inFlight = loadBridgeWatch()
+    .then((value) => {
+      cache = { value, expiresAt: Date.now() + CACHE_MS };
+      refreshBlockedUntil = 0;
+      return value;
+    })
+    .catch((e) => {
+      refreshBlockedUntil = Date.now() + FAILURE_BACKOFF_MS;
+      throw e;
+    })
+    .finally(() => {
+      inFlight = null;
+    });
+  return inFlight;
+}
+
 export async function bridgeRoutes(app: FastifyInstance) {
-  app.get("/bridge-watch", async () => {
-    if (cache && cache.expiresAt > Date.now()) return cache.value;
-    if (!inFlight) {
-      inFlight = loadBridgeWatch()
-        .then((value) => {
-          cache = { value, expiresAt: Date.now() + CACHE_MS };
-          return value;
-        })
-        .finally(() => {
-          inFlight = null;
-        });
+  app.get("/bridge-watch", async (_request, reply) => {
+    // A refresh fans out over explorers, the Arc node and Circle, and regularly
+    // outlives the client's own timeout. An expired snapshot is still a real
+    // observation with its own refreshedAt, so it is served while the refresh
+    // runs behind the request instead of being thrown away.
+    if (cache) {
+      if (cache.expiresAt <= Date.now() && Date.now() >= refreshBlockedUntil) {
+        void startRefresh().catch(() => undefined);
+      }
+      return cache.value;
     }
-    return inFlight;
+    if (Date.now() < refreshBlockedUntil) {
+      return reply.code(503).send({
+        error: "bridge_watch_unavailable",
+        message:
+          "The last bridge refresh failed and no snapshot has been produced yet. This is a read gap, not an empty bridge.",
+        retryAfterMs: refreshBlockedUntil - Date.now(),
+      });
+    }
+    return startRefresh();
   });
 }

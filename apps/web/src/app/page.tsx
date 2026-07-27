@@ -93,7 +93,11 @@ export default async function HomePage() {
   if (statsRes.status === "fulfilled") stats = statsRes.value;
 
   const latest = stats?.latest ?? null;
-  const dialScore = latest?.score ?? null;
+  // /stats derives the score from the scored categories without checking the
+  // verdict, so a report that already declared the data insufficient can arrive
+  // with a low number attached. Showing it would fill the dial green for a
+  // token nothing could be read about.
+  const dialScore = latest && latest.overall !== "insufficient_data" ? latest.score : null;
 
   return (
     <div>

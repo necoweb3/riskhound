@@ -28,11 +28,17 @@ export interface ContractAnalysisResult {
   decimals: number | null;
   totalSupply: string | null;
   owner: string | null;
+  /** Explorer exchange rate for this token, passed on so one analysis does not
+   *  fetch the same token page twice. */
+  exchangeRate: string | null;
   isVerified: boolean;
   isProxy: boolean;
   proxyReasons: string[];
   bytecodeHash: string | null;
   hasCode: boolean;
+  /** True only when the node answered the bytecode request. `hasCode: false`
+   *  with this false means unread, not empty. */
+  codeRead: boolean;
   templateHint: string | null;
   deployer: string | null;
   deployTxHash: string | null;
@@ -61,6 +67,10 @@ function ev(
 function parseDecimals(value: unknown): number | null {
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
+}
+
+function errMessage(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
 }
 
 const SELECTOR_RISKS: Record<
@@ -169,6 +179,7 @@ export async function analyzeContract(input: ContractAnalysisInput): Promise<Con
   let decimals: number | null = null;
   let totalSupply: string | null = null;
   let owner: string | null = null;
+  let exchangeRate: string | null = null;
   let isVerified = false;
   let isProxy = false;
   let proxyReasons: string[] = [];
@@ -182,9 +193,22 @@ export async function analyzeContract(input: ContractAnalysisInput): Promise<Con
   let sourceUnavailable = false;
   let code: Hex | null = null;
 
+  // None of these six reads consumes another's output: the merges below are
+  // last-writer-wins over independently fetched fields. Run one after another
+  // they were six round trips in front of every other analyzer, and a degraded
+  // explorer serialised four separate 25 s waits before anything else started.
+  const [addrRes, tokenRes, creationRes, sourceRes, metaRes, probeRes] = await Promise.allSettled([
+    input.explorer.getAddress(input.address),
+    input.explorer.getToken(input.address),
+    input.explorer.getContractCreation(input.address),
+    input.explorer.getContractSource(input.address),
+    input.rpc ? readErc20Meta(input.rpc, input.address) : Promise.resolve(null),
+    input.rpc ? probeCode(input.rpc, input.address) : Promise.resolve(null),
+  ]);
+
   // Explorer address / token
-  try {
-    const addrInfo = await input.explorer.getAddress(input.address);
+  if (addrRes.status === "fulfilled") {
+    const addrInfo = addrRes.value;
     dataSourcesUsed.push(`${input.chain}:blockscout_address`);
     if (addrInfo) {
       isVerified = Boolean(addrInfo.is_verified);
@@ -201,36 +225,37 @@ export async function analyzeContract(input: ContractAnalysisInput): Promise<Con
         totalSupply = addrInfo.token.total_supply ?? totalSupply;
       }
     }
-  } catch (e) {
-    errors.push(`explorer address: ${e instanceof Error ? e.message : String(e)}`);
+  } else {
+    errors.push(`explorer address: ${errMessage(addrRes.reason)}`);
   }
 
-  try {
-    const token = await input.explorer.getToken(input.address);
+  if (tokenRes.status === "fulfilled") {
+    const token = tokenRes.value;
     dataSourcesUsed.push(`${input.chain}:blockscout_token`);
     if (token) {
       name = token.name ?? name;
       symbol = token.symbol ?? symbol;
       if (token.decimals != null) decimals = parseDecimals(token.decimals) ?? decimals;
       totalSupply = token.total_supply ?? totalSupply;
+      exchangeRate = token.exchange_rate ?? null;
     }
-  } catch (e) {
-    errors.push(`explorer token: ${e instanceof Error ? e.message : String(e)}`);
+  } else {
+    errors.push(`explorer token: ${errMessage(tokenRes.reason)}`);
   }
 
-  try {
-    const creation = await input.explorer.getContractCreation(input.address);
+  if (creationRes.status === "fulfilled") {
+    const creation = creationRes.value;
     dataSourcesUsed.push(`${input.chain}:blockscout_creation`);
     if (creation) {
       deployer = creation.contractCreator?.toLowerCase() ?? deployer;
       deployTxHash = creation.txHash ?? deployTxHash;
     }
-  } catch (e) {
-    errors.push(`explorer creation: ${e instanceof Error ? e.message : String(e)}`);
+  } else {
+    errors.push(`explorer creation: ${errMessage(creationRes.reason)}`);
   }
 
-  try {
-    const source = await input.explorer.getContractSource(input.address);
+  if (sourceRes.status === "fulfilled") {
+    const source = sourceRes.value;
     dataSourcesUsed.push(`${input.chain}:blockscout_source`);
     if (source) {
       isVerified = Boolean(source.is_verified) || isVerified;
@@ -238,25 +263,27 @@ export async function analyzeContract(input: ContractAnalysisInput): Promise<Con
     } else {
       sourceUnavailable = true;
     }
-  } catch {
+  } else {
     sourceUnavailable = true;
   }
 
   if (input.rpc) {
-    try {
-      const meta = await readErc20Meta(input.rpc, input.address);
+    if (metaRes.status === "fulfilled") {
+      const meta = metaRes.value;
       dataSourcesUsed.push(`${input.chain}:rpc_erc20`);
-      name = meta.name ?? name;
-      symbol = meta.symbol ?? symbol;
-      decimals = meta.decimals ?? decimals;
-      totalSupply = meta.totalSupply ?? totalSupply;
-      owner = meta.owner?.toLowerCase() ?? owner;
-    } catch (e) {
-      errors.push(`rpc meta: ${e instanceof Error ? e.message : String(e)}`);
+      if (meta) {
+        name = meta.name ?? name;
+        symbol = meta.symbol ?? symbol;
+        decimals = meta.decimals ?? decimals;
+        totalSupply = meta.totalSupply ?? totalSupply;
+        owner = meta.owner?.toLowerCase() ?? owner;
+      }
+    } else {
+      errors.push(`rpc meta: ${errMessage(metaRes.reason)}`);
     }
 
-    const probe = await probeCode(input.rpc, input.address);
-    if (probe.ok) {
+    const probe = probeRes.status === "fulfilled" ? probeRes.value : null;
+    if (probe?.ok) {
       codeRead = true;
       code = probe.code;
       dataSourcesUsed.push(`${input.chain}:rpc_code`);
@@ -271,7 +298,7 @@ export async function analyzeContract(input: ContractAnalysisInput): Promise<Con
         }
       }
     } else {
-      errors.push(`rpc code: ${probe.error}`);
+      errors.push(`rpc code: ${probe ? probe.error : "bytecode probe did not complete"}`);
     }
   } else {
     errors.push("RPC unavailable for this chain. Bytecode analysis is limited.");
@@ -419,11 +446,13 @@ export async function analyzeContract(input: ContractAnalysisInput): Promise<Con
     decimals,
     totalSupply,
     owner,
+    exchangeRate,
     isVerified,
     isProxy,
     proxyReasons,
     bytecodeHash: codeHash,
     hasCode,
+    codeRead,
     templateHint,
     deployer,
     deployTxHash,

@@ -88,7 +88,7 @@ export function WalletBar() {
     <div className="card row" style={{ marginBottom: "1rem" }}>
       <div style={{ flex: 1, minWidth: 200 }}>
         <div className="dim" style={{ fontSize: "0.8rem", marginBottom: 4 }}>
-          Session wallet (no keys, address only for watchlist / admin / payments)
+          Session wallet (address only, for the watchlist and reviewer tools, never a key)
         </div>
         <input
           className="input mono"

@@ -20,7 +20,7 @@ function recipient(value: string | null) { return /^0x[0-9a-fA-F]{64}$/.test(val
 async function scanOne(source: typeof SOURCES[number]) {
   const key = `cctp_backfill_${source.key}`;
   const saved = await prisma.indexerCursor.findUnique({ where: { key } });
-  const meta = saved?.metaJson ? JSON.parse(saved.metaJson) as { cursor?: Cursor | null; exhausted?: boolean; emptyPages?: number } : {};
+  const meta = saved?.metaJson ? JSON.parse(saved.metaJson) as { cursor?: Cursor | null; exhausted?: boolean } : {};
   // Exhaustion only counts when there is no page left. A stored flag with a
   // cursor still on it was latched by the old low-yield rule, so resume there.
   if (meta.exhausted && !meta.cursor) return { source: source.key, matched: 0, exhausted: true };
@@ -44,13 +44,14 @@ async function scanOne(source: typeof SOURCES[number]) {
     });
     matched++;
   }
-  const emptyPages = matched === 0 ? (meta.emptyPages ?? 0) + 1 : 0;
   const cursor = body.next_page_params ?? null;
   // Only the end of the address history ends the backfill. A run of pages with
   // no Arc-bound burns used to latch `exhausted`, which stopped the source for
-  // good and left the rest of the history unindexed.
+  // good and left the rest of the history unindexed. The emptyPages counter that
+  // fed that rule went with it; leaving it in the cursor made an operator read
+  // it as a live gate on a stalled source.
   const exhausted = !cursor;
-  await prisma.indexerCursor.upsert({ where: { key }, create: { key, lastAt: new Date(), metaJson: JSON.stringify({ cursor, exhausted, emptyPages }) }, update: { lastAt: new Date(), metaJson: JSON.stringify({ cursor, exhausted, emptyPages }) } });
+  await prisma.indexerCursor.upsert({ where: { key }, create: { key, lastAt: new Date(), metaJson: JSON.stringify({ cursor, exhausted }) }, update: { lastAt: new Date(), metaJson: JSON.stringify({ cursor, exhausted }) } });
   return { source: source.key, matched, exhausted };
 }
 

@@ -48,11 +48,15 @@ export async function runRobinhoodIndexer() {
     throw e;
   }
 
+  let unreadCreators = 0;
   try {
     // Walk the explorer pages instead of the first slice of page one, so tokens
     // past the newest few are indexed at all. Bounded to keep one poll finite.
     const maxPagesEnv = Number(process.env.ROBINHOOD_INDEXER_MAX_PAGES ?? 5);
     const maxPages = Number.isFinite(maxPagesEnv) && maxPagesEnv >= 1 ? Math.floor(maxPagesEnv) : 5;
+    const concurrencyEnv = Number(process.env.ROBINHOOD_INDEXER_CONCURRENCY ?? 8);
+    const concurrency =
+      Number.isFinite(concurrencyEnv) && concurrencyEnv >= 1 ? Math.floor(concurrencyEnv) : 8;
     const items: BsTokenInfo[] = [];
     let cursor: Record<string, unknown> | null = null;
     let pages = 0;
@@ -63,32 +67,56 @@ export async function runRobinhoodIndexer() {
       pages++;
     } while (cursor && pages < maxPages);
 
+    // Memoised for the length of the run. Both reads are keyed on an address,
+    // not on the token, so a deployer behind ten of these tokens answered ten
+    // identical explorer requests and ten identical event lookups per poll.
+    const creations = new Map<string, ReturnType<typeof rh.explorer.getContractCreation>>();
+    const deployerTxs = new Map<string, ReturnType<typeof rh.explorer.getAddressTransactions>>();
+    const deployerWallets = new Map<string, Promise<unknown>>();
+    const memo = <T>(cache: Map<string, T>, key: string, make: () => T): T => {
+      const hit = cache.get(key);
+      if (hit !== undefined) return hit;
+      const made = make();
+      cache.set(key, made);
+      return made;
+    };
+
     let processed = 0;
-    for (const t of items) {
+    let creatorUnreadable = 0;
+
+    const indexToken = async (t: BsTokenInfo) => {
       const address = (t.address ?? t.address_hash ?? "").toLowerCase();
-      if (!address.startsWith("0x")) continue;
+      if (!address.startsWith("0x")) return;
       processed++;
 
       let deployer: string | null = null;
       let deployTx: string | null = null;
+      // "We could not read the creator" and "the creator is clean" are
+      // different facts, and the concentration signal below must not be
+      // dropped just because this unrelated call failed.
+      let creationUnread = false;
       try {
-        const creation = await rh.explorer.getContractCreation(address);
+        const creation = await memo(creations, address, () => rh.explorer.getContractCreation(address));
         deployer = creation?.contractCreator?.toLowerCase() ?? null;
         deployTx = creation?.txHash ?? null;
       } catch {
-        /* optional */
+        creationUnread = true;
+        creatorUnreadable++;
       }
 
       if (deployer) {
-        await prisma.wallet.upsert({
-          where: { chain_address: { chain: "robinhood", address: deployer } },
-          create: {
-            chain: "robinhood",
-            address: deployer,
-            labelsJson: jstr(["deployer"]),
-          },
-          update: {},
-        });
+        const known = deployer;
+        await memo(deployerWallets, known, () =>
+          prisma.wallet.upsert({
+            where: { chain_address: { chain: "robinhood", address: known } },
+            create: {
+              chain: "robinhood",
+              address: known,
+              labelsJson: jstr(["deployer"]),
+            },
+            update: {},
+          })
+        );
       }
 
       try {
@@ -102,15 +130,19 @@ export async function runRobinhoodIndexer() {
               top += BigInt(h.value ?? "0");
             }
             const pct = Number((top * 10000n) / supply) / 100;
-            if (pct >= 90 && deployer) {
+            if (pct >= 90) {
               await upsertEvent({
                 chain: "robinhood",
                 eventClass: "heavy_insider_control",
                 title: `High top-holder concentration on ${t.symbol ?? address.slice(0, 10)}`,
-                detail: `Top holders control ~${pct.toFixed(1)}% of supply (explorer snapshot).`,
+                detail:
+                  `Top holders control ~${pct.toFixed(1)}% of supply (explorer snapshot).` +
+                  (creationUnread
+                    ? " The contract creator could not be read from the explorer for this snapshot."
+                    : ""),
                 tokenAddress: address,
                 addresses: [
-                  deployer,
+                  ...(deployer ? [deployer] : []),
                   ...items.slice(0, 5).map((h) =>
                     (typeof h.address === "string" ? h.address : h.address.hash).toLowerCase()
                   ),
@@ -134,8 +166,9 @@ export async function runRobinhoodIndexer() {
       }
 
       if (deployer) {
+        const known = deployer;
         try {
-          const txs = await rh.explorer.getAddressTransactions(deployer);
+          const txs = await memo(deployerTxs, known, () => rh.explorer.getAddressTransactions(known));
           const deploys = (txs.items ?? []).filter((x) => x.created_contract?.hash);
           if (deploys.length >= 5) {
             await upsertEvent({
@@ -163,22 +196,46 @@ export async function runRobinhoodIndexer() {
           /* optional */
         }
       }
-    }
+    };
+
+    // Nothing in a token's reads depends on the previous token, and the holders
+    // call alone measures in seconds, so a strictly serial pass over 250 tokens
+    // could not finish inside the poll interval.
+    let next = 0;
+    const drain = async () => {
+      for (;;) {
+        const t = items[next++];
+        if (!t) return;
+        try {
+          await indexToken(t);
+        } catch (e) {
+          // One token that cannot be written must not take the rest of the
+          // pass with it, which is easy to do once these run together.
+          console.warn("[rh-indexer] token", e instanceof Error ? e.message : e);
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, drain));
+    unreadCreators = creatorUnreadable;
     console.log(`[rh-indexer] processed ${processed} tokens across ${pages} pages`);
   } catch (e) {
     console.warn("[rh-indexer] tokens", e instanceof Error ? e.message : e);
   }
 
+  // Creator lookups that failed are a gap in this pass, not an absence of
+  // creators, so the count is recorded rather than left implicit.
   await prisma.indexerCursor.upsert({
     where: { key: "rh_indexer" },
     create: {
       key: "rh_indexer",
       lastBlock: latest != null ? BigInt(latest) : BigInt(0),
       lastAt: new Date(),
+      metaJson: JSON.stringify({ unreadCreators }),
     },
     update: {
       lastBlock: latest != null ? BigInt(latest) : undefined,
       lastAt: new Date(),
+      metaJson: JSON.stringify({ unreadCreators }),
     },
   });
 }

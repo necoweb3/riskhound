@@ -55,7 +55,10 @@ export async function appealRoutes(app: FastifyInstance) {
   app.get("/appeals", async (req) => {
     const wallet = authenticatedAddress(req.headers);
     if (!wallet) {
-      return { items: [], note: "Provide X-Wallet-Address to list your appeals" };
+      return {
+        items: [],
+        note: "Provide Authorization: Bearer <session token> from POST /auth/verify to list your appeals",
+      };
     }
     const user = await prisma.user.findUnique({ where: { walletAddress: wallet } });
     if (!user) return { items: [] };

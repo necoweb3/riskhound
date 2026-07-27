@@ -34,6 +34,22 @@ describe("isRevert", () => {
     expect(isRevert(new Error("rate limit exceeded"))).toBe(false);
   });
 
+  it("does not read the RPC host out of the message as a transport failure", () => {
+    // viem puts `URL: <rpcUrl>` into every raw eth_call error, and every Arc
+    // endpoint is on the .network TLD. A bare "network" match turned real
+    // reverts into "not tested" and made the honeypot rule unreachable.
+    const e = new Error(
+      "RPC Request failed.\n\nURL: https://rpc.drpc.testnet.arc.network\nRequest body: {}\n\nDetails: execution reverted"
+    );
+    e.name = "RpcRequestError";
+    expect(isRevert(e)).toBe(true);
+  });
+
+  it("still reads a real network error as a transport failure", () => {
+    expect(isRevert(new Error("network error while sending request"))).toBe(false);
+    expect(isRevert(new Error("NetworkError when attempting to fetch resource"))).toBe(false);
+  });
+
   it("defaults to not-a-revert for anything it does not recognise", () => {
     expect(isRevert(new Error("something entirely unexpected"))).toBe(false);
     expect(isRevert(undefined)).toBe(false);
@@ -90,7 +106,6 @@ describe("analyzeApexiSwap LP burn share", () => {
     const res = await analyzeApexiSwap({
       chain: "arc_testnet",
       token: TOKEN,
-      tokenDecimals: 18,
       rpc: rpcWithPair(),
       explorer,
     });
@@ -114,12 +129,89 @@ describe("analyzeApexiSwap LP burn share", () => {
     const res = await analyzeApexiSwap({
       chain: "arc_testnet",
       token: TOKEN,
-      tokenDecimals: 18,
       rpc: rpcWithPair(),
       explorer,
     });
 
     expect(res.pair?.burned).toBe(true);
     expect(res.lpDataComplete).toBe(true);
+  });
+});
+
+/** Reserves are non-zero, so the router quote decides the buy verdict. */
+function rpcWithLiquidity(quote: () => unknown): PublicClient {
+  return {
+    readContract: async ({ functionName }: { functionName: string }) => {
+      switch (functionName) {
+        case "getPair":
+          return PAIR;
+        case "token0":
+          return TOKEN;
+        case "token1":
+          return "0x911b4000D3422F482F4062a913885f7b035382Df";
+        case "getReserves":
+          return [1_000n, 1_000n, 0];
+        case "getAmountsOut":
+          return quote();
+        default:
+          throw new Error(`unexpected call: ${functionName}`);
+      }
+    },
+    chain: { id: 5042002 },
+  } as unknown as PublicClient;
+}
+
+const emptyLpExplorer = {
+  getToken: async () => null,
+  getTokenHolders: async () => ({ items: [] }),
+  getTokenTransfers: async () => ({ items: [] }),
+} as unknown as BlockscoutClient;
+
+describe("analyzeApexiSwap buy verdict", () => {
+  it("leaves the buy path unknown when the router quote never answered", async () => {
+    const res = await analyzeApexiSwap({
+      chain: "arc_testnet",
+      token: TOKEN,
+      rpc: rpcWithLiquidity(() => {
+        const e = new Error("HTTP request failed: 429 Too Many Requests");
+        e.name = "HttpRequestError";
+        throw e;
+      }),
+      explorer: emptyLpExplorer,
+      skipSimulation: true,
+    });
+
+    // A rate-limited node tested nothing. "Cannot buy" would be a claim about
+    // the token drawn from a claim about the transport.
+    expect(res.simulation.canBuy).toBeNull();
+  });
+
+  it("reports a proven revert on the quote as a failed buy", async () => {
+    const res = await analyzeApexiSwap({
+      chain: "arc_testnet",
+      token: TOKEN,
+      rpc: rpcWithLiquidity(() => {
+        throw new Error("execution reverted: INSUFFICIENT_LIQUIDITY");
+      }),
+      explorer: emptyLpExplorer,
+      skipSimulation: true,
+    });
+
+    expect(res.simulation.canBuy).toBe(false);
+  });
+
+  it("reports an answered quote as a buyable path", async () => {
+    const res = await analyzeApexiSwap({
+      chain: "arc_testnet",
+      token: TOKEN,
+      rpc: rpcWithLiquidity(() => [10n, 20n]),
+      explorer: emptyLpExplorer,
+      skipSimulation: true,
+    });
+
+    expect(res.simulation.canBuy).toBe(true);
+    // skipSimulation must not let an unrun round trip claim a sell path.
+    expect(res.simulation.canSell).toBeNull();
+    expect(res.simulation.dataComplete).toBe(false);
   });
 });

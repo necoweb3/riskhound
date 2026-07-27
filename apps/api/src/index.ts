@@ -56,19 +56,11 @@ async function main() {
       if (process.env.NODE_ENV !== "production" && /^http:\/\/(localhost|127\.0\.0\.1):\d+$/.test(origin)) {
         return callback(null, true);
       }
-      return callback(new Error("Origin is not allowed"), false);
+      // An origin outside the allow list is a policy decision, not a server
+      // fault. Throwing here surfaced as a 500 and logged every scanner as an
+      // error; omitting the CORS headers is what actually blocks the browser.
+      return callback(null, false);
     },
-    exposedHeaders: [
-      "X-Payment-Required",
-      "X-Payment-Network",
-      "X-Payment-Chain-Id",
-      "X-Payment-Asset",
-      "X-Payment-Amount",
-      "X-Payment-Recipient",
-      "X-Payment-Request-Id",
-      "X-Payment-Expires",
-      "X-Payment-Max-Spend",
-    ],
   });
 
   await app.register(rateLimit, {

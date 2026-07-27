@@ -218,17 +218,30 @@ export class BlockscoutClient {
    */
   async getAllTokenHolders(address: string, maxPages = 8) {
     const items: { address: { hash: string } | string; value: string; token?: BsTokenInfo }[] = [];
+    const seen = new Set<string>();
     let cursor: Record<string, unknown> | null = null;
     let complete = false;
 
     for (let page = 0; page < maxPages; page++) {
       const res = await this.getTokenHolders(address, cursor);
-      items.push(...(res.items ?? []));
-      cursor = (res.next_page_params ?? null) as Record<string, unknown> | null;
-      if (!cursor || !Object.keys(cursor).length || !(res.items ?? []).length) {
+      // One holder returned on several pages would be counted several times by
+      // concentration analysis, and would break the @@unique([tokenId, address])
+      // insert after the risk verdict has already been stored.
+      for (const item of res.items ?? []) {
+        const holder = this.addrHash(item.address);
+        if (holder && seen.has(holder)) continue;
+        if (holder) seen.add(holder);
+        items.push(item);
+      }
+      const next = (res.next_page_params ?? null) as Record<string, unknown> | null;
+      if (!next || !Object.keys(next).length || !(res.items ?? []).length) {
         complete = true;
         break;
       }
+      // A cursor that does not advance would page over the same holders until
+      // maxPages. Stop and report the list as truncated, which is what it is.
+      if (JSON.stringify(next) === JSON.stringify(cursor)) break;
+      cursor = next;
     }
 
     return { items, complete };

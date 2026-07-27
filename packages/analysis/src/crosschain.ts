@@ -5,7 +5,7 @@ import type {
   RiskEventSummary,
   RiskFinding,
 } from "@rugkiller/shared";
-import type { BlockscoutClient } from "@rugkiller/chain";
+import { BlockscoutError, type BlockscoutClient } from "@rugkiller/chain";
 import { shouldIgnoreForOwnership } from "@rugkiller/shared";
 
 export interface CrossChainInput {
@@ -61,7 +61,21 @@ export async function compareCrossChain(input: CrossChainInput): Promise<CrossCh
     .filter((a, i, arr) => arr.indexOf(a) === i)
     .filter((a) => !shouldIgnoreForOwnership(a));
 
-  for (const addr of addresses) {
+  // The addresses are independent of one another and the two reads within an
+  // address do not consume each other, so the whole set is issued at once
+  // instead of up to fourteen strictly serial explorer calls. Results are
+  // folded back in address order so links and findings stay deterministic.
+  const scans = await Promise.all(
+    addresses.map(async (addr) => {
+      const [txsRead, addrRead] = await Promise.allSettled([
+        input.rhExplorer.getAddressTransactions(addr),
+        input.rhExplorer.getAddress(addr),
+      ]);
+      return { addr, txsRead, addrRead };
+    })
+  );
+
+  for (const { addr, txsRead, addrRead } of scans) {
     const relatedRiskEvents = (input.rhRiskEvents ?? []).filter(
       (event) =>
         event.chain !== "arc_testnet" &&
@@ -104,16 +118,24 @@ export async function compareCrossChain(input: CrossChainInput): Promise<CrossCh
     }
 
     // One transaction page per address, reused by both checks below.
-    let rhTxs: Awaited<ReturnType<typeof input.rhExplorer.getAddressTransactions>> | null = null;
-    try {
-      rhTxs = await input.rhExplorer.getAddressTransactions(addr);
-    } catch {
-      /* optional */
+    const rhTxs = txsRead.status === "fulfilled" ? txsRead.value : null;
+    // A 404 is an answer: the address is not on this chain. Any other failure
+    // is an unread page, and staying silent about it makes it indistinguishable
+    // from "no outside-chain activity" for a caller that counts errors to
+    // decide whether this category was examined.
+    if (
+      txsRead.status === "rejected" &&
+      !(txsRead.reason instanceof BlockscoutError && txsRead.reason.status === 404)
+    ) {
+      const reason = txsRead.reason;
+      errors.push(
+        `rh transactions ${addr}: ${reason instanceof Error ? reason.message : String(reason)}`
+      );
     }
 
     // Definitive: same address exists / has activity on Robinhood
-    try {
-      const rhAddr = await input.rhExplorer.getAddress(addr);
+    if (addrRead.status === "fulfilled") {
+      const rhAddr = addrRead.value;
       if (rhAddr) {
         const hasActivity =
           Boolean(rhAddr.creation_tx_hash) ||
@@ -145,8 +167,9 @@ export async function compareCrossChain(input: CrossChainInput): Promise<CrossCh
 
         }
       }
-    } catch (e) {
-      errors.push(`rh address ${addr}: ${e instanceof Error ? e.message : String(e)}`);
+    } else {
+      const reason = addrRead.reason;
+      errors.push(`rh address ${addr}: ${reason instanceof Error ? reason.message : String(reason)}`);
     }
 
     // Keep deployments as internal identity evidence. Deployment on another

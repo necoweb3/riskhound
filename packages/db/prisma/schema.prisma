@@ -40,12 +40,13 @@ model Token {
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt
 
-  analyses     AnalysisRun[]
-  findings     Finding[]
-  holders      TokenHolder[]
-  pools        LiquidityPoolRow[]
-  events       RiskEvent[]
-  simulations  SimulationRun[]
+  analyses        AnalysisRun[]
+  findings        Finding[]
+  holders         TokenHolder[]
+  pools           LiquidityPoolRow[]
+  events          RiskEvent[]
+  simulations     SimulationRun[]
+  crossChainLinks CrossChainLinkRow[]
 
   @@unique([chain, address])
   @@index([chain, deployTimestamp])
@@ -91,6 +92,10 @@ model Finding {
   manualReason      String?
   manualReviewer    String?
   manualAt          DateTime?
+  // A reviewed row survives re-analysis, so a signal that stops firing has to
+  // be marked rather than deleted: the reviewer's decision is kept alongside
+  // the fact that the detector no longer reproduces it.
+  retiredAt         DateTime?
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 
@@ -171,6 +176,11 @@ model Wallet {
 
 model CrossChainLinkRow {
   id                  String   @id @default(cuid())
+  // The snapshot is replaced per analysed token. Without this the delete had to
+  // guess from fromAddress, which also matched the rows of every sibling token
+  // sharing a deployer.
+  tokenId             String?
+  token               Token?   @relation(fields: [tokenId], references: [id], onDelete: Cascade)
   strength            String
   fromChain           String
   toChain             String
@@ -181,6 +191,7 @@ model CrossChainLinkRow {
   relatedEventIdsJson String   @default("[]")
   createdAt           DateTime @default(now())
 
+  @@index([tokenId])
   @@index([fromAddress])
   @@index([toAddress])
   @@index([strength])
@@ -203,6 +214,10 @@ model RiskEvent {
   evidenceJson    String
   txHashesJson    String   @default("[]")
   occurredAt      DateTime
+  // Set when a later run no longer reproduces the finding behind an automatic
+  // event. occurredAt still records the first observation, so the row keeps the
+  // window the signal was live rather than being served as current forever.
+  resolvedAt      DateTime?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 

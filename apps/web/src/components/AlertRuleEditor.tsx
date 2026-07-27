@@ -18,7 +18,10 @@ const OPS: { key: Op; label: string }[] = [
   { key: "changes", label: "changes at all" },
 ];
 
-const CHANNELS = { app: "In app", email: "Email", webhook: "Webhook" } as const;
+// Only channels something can actually deliver on belong here. Nothing in the
+// API or the worker sends mail or posts a webhook, so offering them would
+// promise a notification that can never fire.
+const CHANNELS = { app: "In app" } as const;
 type ChannelKey = keyof typeof CHANNELS;
 
 export type AlertRule = {
@@ -36,11 +39,7 @@ export function AlertRuleEditor({ onArm }: { onArm?: (rule: AlertRule) => void }
   const [metric, setMetric] = useState<MetricKey>("top10");
   const [op, setOp] = useState<Op>("above");
   const [value, setValue] = useState(70);
-  const [channels, setChannels] = useState<Record<ChannelKey, boolean>>({
-    app: true,
-    email: true,
-    webhook: false,
-  });
+  const [channels, setChannels] = useState<Record<ChannelKey, boolean>>({ app: true });
 
   const m = METRICS[metric];
 

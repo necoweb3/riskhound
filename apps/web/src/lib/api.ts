@@ -5,7 +5,7 @@ export function getApiUrl() {
 }
 
 /** A page render must not hang on a stalled API. */
-const REQUEST_TIMEOUT_MS = Number(process.env.API_TIMEOUT_MS ?? 15_000);
+export const REQUEST_TIMEOUT_MS = Number(process.env.API_TIMEOUT_MS ?? 15_000);
 
 export async function apiGet<T>(path: string, init?: RequestInit): Promise<T> {
   let res: Response;

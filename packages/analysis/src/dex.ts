@@ -97,14 +97,43 @@ export function isRevert(error: unknown): boolean {
     return false;
   }
   const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
-  if (/timeout|timed out|fetch failed|econn|socket|network|rate limit|too many requests|\b(429|502|503|504)\b/.test(message)) {
+  // Match "network error", never a bare "network": viem puts `URL: <rpcUrl>`
+  // in the message of every raw eth_call failure and every Arc endpoint is on
+  // the .network TLD, so a bare match classified real reverts as transport and
+  // left the honeypot rule unreachable on this chain.
+  if (
+    /timeout|timed out|fetch failed|econn|socket|network ?error|network request|rate limit|too many requests|\b(429|502|503|504)\b/.test(
+      message
+    )
+  ) {
     return false;
   }
   return /execution reverted|reverted with|invalid opcode|out of gas/.test(message);
 }
 
+/**
+ * The base token is a compile-time constant, so its balance slot cannot change
+ * for a given chain. Re-probing it per analysis costs one sequential eth_call
+ * per slot, and a node that refuses state overrides or rate-limits pays all 33
+ * on every request. A resolved slot is kept; a failure is only trusted briefly
+ * so a passing outage does not disable the round trip for the process lifetime.
+ */
+const baseSlotCache = new Map<number, { key: Hex | null; at: number }>();
+const BASE_SLOT_FAILURE_TTL_MS = 60_000;
+
+async function resolveBaseBalanceSlot(client: PublicClient): Promise<Hex | null> {
+  const chainId = client.chain?.id ?? 0;
+  const cached = baseSlotCache.get(chainId);
+  if (cached && (cached.key != null || Date.now() - cached.at < BASE_SLOT_FAILURE_TTL_MS)) {
+    return cached.key;
+  }
+  const key = await discoverBalanceSlot(client, APEXISWAP.baseToken);
+  baseSlotCache.set(chainId, { key, at: Date.now() });
+  return key;
+}
+
 async function executeRoundTrip(client: PublicClient, token: Address, amountIn: bigint) {
-  const slotKey = await discoverBalanceSlot(client, APEXISWAP.baseToken);
+  const slotKey = await resolveBaseBalanceSlot(client);
   if (!slotKey) return { ok: false as const, tested: false, reason: "Base-token balance storage slot could not be resolved safely." };
   const data = encodeFunctionData({
     abi: simulatorAbi,
@@ -145,7 +174,7 @@ async function executeRoundTrip(client: PublicClient, token: Address, amountIn: 
  * An unparseable amount is unknown, and a bare BigInt() would throw and take
  * the whole token analysis down with it.
  */
-function toBigInt(value: unknown): bigint | null {
+export function toBigInt(value: unknown): bigint | null {
   if (typeof value === "bigint") return value;
   if (typeof value === "number") return Number.isInteger(value) ? BigInt(value) : null;
   if (typeof value !== "string" || value.trim() === "") return null;
@@ -158,10 +187,14 @@ function toBigInt(value: unknown): bigint | null {
 
 export async function analyzeApexiSwap(opts: {
   token: Address;
-  tokenDecimals: number | null;
   rpc: PublicClient | null;
   explorer: BlockscoutClient;
   chain: string;
+  /**
+   * Skip the isolated round trip. Callers that only want the pair and LP data
+   * used to run it anyway and throw the answer away.
+   */
+  skipSimulation?: boolean;
 }): Promise<{
   pair: LiquidityPool | null;
   simulation: SimulationResult;
@@ -306,15 +339,25 @@ export async function analyzeApexiSwap(opts: {
   const baseReserve = tokenIs0 ? reserves[1] : reserves[0];
   const hasLiquidity = tokenReserve > 0n && baseReserve > 0n;
   const amountIn = 10n ** 16n; // 0.01 WUSDC, 18 decimals
+  // A quote that never answered has told us nothing about this token, so it
+  // gets the same ok/error shape as the factory lookup rather than collapsing
+  // into "no". Otherwise a 429 on a tradable token rendered as "Buy: Failed".
   const buyQuote = hasLiquidity
-    ? await opts.rpc.readContract({
-        address: APEXISWAP.router,
-        abi: routerAbi,
-        functionName: "getAmountsOut",
-        args: [amountIn, [APEXISWAP.baseToken, opts.token]],
-      }).catch(() => null)
+    ? await opts.rpc
+        .readContract({
+          address: APEXISWAP.router,
+          abi: routerAbi,
+          functionName: "getAmountsOut",
+          args: [amountIn, [APEXISWAP.baseToken, opts.token]],
+        })
+        .then((value) => ({ ok: true as const, value }))
+        .catch((error: unknown) => ({ ok: false as const, error }))
     : null;
-  const execution = buyQuote ? await executeRoundTrip(opts.rpc, opts.token, amountIn) : null;
+  const buyQuoteReverted = buyQuote != null && !buyQuote.ok && isRevert(buyQuote.error);
+  const execution =
+    buyQuote?.ok && !opts.skipSimulation
+      ? await executeRoundTrip(opts.rpc, opts.token, amountIn)
+      : null;
 
   const [lpToken, lpHolders, lpTransfers] = await Promise.all([
     opts.explorer.getToken(pairAddress).catch(() => null),
@@ -371,9 +414,11 @@ export async function analyzeApexiSwap(opts: {
     : {
         step: "Isolated buy → approve → sell",
         success: false,
-        detail: execution?.reverted
-          ? "Round-trip execution reverted on the sell leg."
-          : "Round-trip execution could not be completed, so sellability is unproven.",
+        detail: opts.skipSimulation
+          ? "Execution test was not requested for this analysis, so sellability is unproven."
+          : execution?.reverted
+            ? "Round-trip execution reverted on the sell leg."
+            : "Round-trip execution could not be completed, so sellability is unproven.",
         error: execution?.reason,
         evidence,
       };
@@ -395,7 +440,9 @@ export async function analyzeApexiSwap(opts: {
             : "No burned LP share observed in the returned holder page.",
     ],
     simulation: {
-      canBuy: Boolean(buyQuote),
+      // Same rule as the sell leg: only a dry pair or a proven revert may make
+      // the negative claim. A router that did not answer leaves it unknown.
+      canBuy: !hasLiquidity ? false : buyQuote?.ok ? true : buyQuoteReverted ? false : null,
       // A proven revert is the only thing that may say "cannot sell".
       // Collapsing it to null made the honeypot rule in scoring.ts
       // unreachable, so a real sell trap was never reported as one.

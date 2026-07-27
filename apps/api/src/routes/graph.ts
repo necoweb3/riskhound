@@ -6,12 +6,12 @@ import { normalizeAddress } from "@rugkiller/chain";
 const MAX_DEPTH = 3;
 const MAX_VISITED = 120;
 const MAX_EDGES_PER_NODE = 40;
-/** Every expansion is one sequential database round trip, so the walk is capped. */
+/** Every expansion is one database read, so the walk is capped. */
 const MAX_NODE_QUERIES = 40;
 
 export async function graphRoutes(app: FastifyInstance) {
-  // A single request can issue MAX_NODE_QUERIES sequential queries, so it needs
-  // a tighter budget than the global limit.
+  // A single request can issue MAX_NODE_QUERIES queries, so it needs a tighter
+  // budget than the global limit.
   const pathRoute = { config: { rateLimit: { max: 20, timeWindow: "1 minute" } } };
 
   app.get("/graph/path", pathRoute, async (req, reply) => {
@@ -37,52 +37,64 @@ export async function graphRoutes(app: FastifyInstance) {
     }
 
     type StoredEdge = Awaited<ReturnType<typeof prisma.graphEdgeRow.findMany>>[number];
-    const queue: { address: string; nodes: string[]; edges: StoredEdge[] }[] = [
-      { address: from, nodes: [from], edges: [] },
-    ];
+    type Walk = { address: string; nodes: string[]; edges: StoredEdge[] };
+    let frontier: Walk[] = [{ address: from, nodes: [from], edges: [] }];
     const visited = new Set([from]);
     let nodeQueries = 0;
-    while (queue.length && visited.size <= MAX_VISITED && nodeQueries < MAX_NODE_QUERIES) {
-      const current = queue.shift()!;
-      if (current.edges.length >= q.maxDepth) continue;
-      nodeQueries += 1;
-      const rows = await prisma.graphEdgeRow.findMany({
-        where: {
-          chain: q.chain,
-          serviceExcluded: false,
-          OR: [{ sourceId: current.address }, { targetId: current.address }],
-        },
-        take: MAX_EDGES_PER_NODE,
-        orderBy: { createdAt: "desc" },
-      });
-      for (const edge of rows) {
-        const next = edge.sourceId === current.address ? edge.targetId : edge.sourceId;
-        if (visited.has(next)) continue;
-        const nodes = [...current.nodes, next];
-        const edges = [...current.edges, edge];
-        if (next === to) {
-          return {
-            schemaVersion: "rugkiller.graph-path.v1",
-            found: true,
-            depth: edges.length,
-            nodes,
-            edges: edges.map((e) => ({
-              id: e.id,
-              source: e.sourceId,
-              target: e.targetId,
-              type: e.edgeType,
-              strength: e.strength,
-              confidence: e.confidence,
-              evidence: jparse(e.evidenceJson, []),
-              label: e.label,
-            })),
-            confidence: edges.every((e) => e.confidence === "high") ? "high" : "medium",
-            limits: { maxDepth: q.maxDepth, maxVisited: MAX_VISITED, maxNodeQueries: MAX_NODE_QUERIES },
-          };
+    while (frontier.length && visited.size <= MAX_VISITED && nodeQueries < MAX_NODE_QUERIES) {
+      const expandable = frontier
+        .filter((walk) => walk.edges.length < q.maxDepth)
+        .slice(0, MAX_NODE_QUERIES - nodeQueries);
+      if (!expandable.length) break;
+      nodeQueries += expandable.length;
+      // Nodes at the same depth do not depend on each other, so a whole level
+      // goes out at once. Each node keeps its own take, so the rows are the
+      // same ones the node-at-a-time walk read; only the waiting is shared.
+      const rowsPerNode = await Promise.all(
+        expandable.map((walk) =>
+          prisma.graphEdgeRow.findMany({
+            where: {
+              chain: q.chain,
+              serviceExcluded: false,
+              OR: [{ sourceId: walk.address }, { targetId: walk.address }],
+            },
+            take: MAX_EDGES_PER_NODE,
+            orderBy: { createdAt: "desc" },
+          })
+        )
+      );
+      const nextFrontier: Walk[] = [];
+      for (const [index, current] of expandable.entries()) {
+        for (const edge of rowsPerNode[index]) {
+          const next = edge.sourceId === current.address ? edge.targetId : edge.sourceId;
+          if (visited.has(next)) continue;
+          const nodes = [...current.nodes, next];
+          const edges = [...current.edges, edge];
+          if (next === to) {
+            return {
+              schemaVersion: "rugkiller.graph-path.v1",
+              found: true,
+              depth: edges.length,
+              nodes,
+              edges: edges.map((e) => ({
+                id: e.id,
+                source: e.sourceId,
+                target: e.targetId,
+                type: e.edgeType,
+                strength: e.strength,
+                confidence: e.confidence,
+                evidence: jparse(e.evidenceJson, []),
+                label: e.label,
+              })),
+              confidence: edges.every((e) => e.confidence === "high") ? "high" : "medium",
+              limits: { maxDepth: q.maxDepth, maxVisited: MAX_VISITED, maxNodeQueries: MAX_NODE_QUERIES },
+            };
+          }
+          visited.add(next);
+          nextFrontier.push({ address: next, nodes, edges });
         }
-        visited.add(next);
-        queue.push({ address: next, nodes, edges });
       }
+      frontier = nextFrontier;
     }
     return {
       schemaVersion: "rugkiller.graph-path.v1",

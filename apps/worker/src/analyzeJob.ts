@@ -2,7 +2,15 @@ import { analyzeToken } from "@rugkiller/analysis";
 import { prisma, jparse, persistAnalysisResult, type AnalysisResultLike } from "@rugkiller/db";
 import type { RiskEventSummary } from "@rugkiller/shared";
 
-export async function loadRhAndAnalyze(address: string) {
+/**
+ * The supporting-evidence set does not depend on the token being analysed, so
+ * every job recomputed a byte-identical 500-row scan and sort. Reviewed events
+ * change on human timescales, so a short window cannot hide one for long.
+ */
+const EVENTS_TTL_MS = 60_000;
+let cachedEvents: { at: number; events: Promise<RiskEventSummary[]> } | null = null;
+
+async function loadConfirmedRiskEvents(): Promise<RiskEventSummary[]> {
   const events = await prisma.riskEvent.findMany({
     where: {
       chain: { not: "arc_testnet" },
@@ -14,7 +22,7 @@ export async function loadRhAndAnalyze(address: string) {
     take: 500,
   });
 
-  const rhRiskEvents: RiskEventSummary[] = events.map((e) => ({
+  return events.map((e) => ({
     id: e.id,
     chain: e.chain,
     eventClass: e.eventClass as RiskEventSummary["eventClass"],
@@ -27,6 +35,21 @@ export async function loadRhAndAnalyze(address: string) {
     occurredAt: e.occurredAt.toISOString(),
     evidence: jparse(e.evidenceJson, []),
   }));
+}
+
+function confirmedRiskEvents(): Promise<RiskEventSummary[]> {
+  if (cachedEvents && Date.now() - cachedEvents.at < EVENTS_TTL_MS) return cachedEvents.events;
+  const events = loadConfirmedRiskEvents();
+  cachedEvents = { at: Date.now(), events };
+  // A failed read must not be served as an empty evidence set for the window.
+  events.catch(() => {
+    if (cachedEvents?.events === events) cachedEvents = null;
+  });
+  return events;
+}
+
+export async function loadRhAndAnalyze(address: string) {
+  const rhRiskEvents = await confirmedRiskEvents();
 
   const result = await analyzeToken({ address, rhRiskEvents });
   const token = await persistAnalysisResult(result as unknown as AnalysisResultLike);

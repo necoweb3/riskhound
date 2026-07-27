@@ -90,6 +90,14 @@ export type AnalysisResultLike = {
     overall: string;
     confidence: string;
     topFindings: Finding[];
+    /**
+     * Every finding the run scored, grouped by category. topFindings is capped
+     * at eight by the scorer, so this is the only complete list, and a finding
+     * that is absent from it really was not produced this run. dataComplete
+     * says whether the category could be read at all this run, which is what
+     * separates a signal that lapsed from one that could not be measured.
+     */
+    categories?: { category?: string; dataComplete?: boolean; findings: Finding[] }[];
     lastBlock: number | null;
     dataSources: unknown[];
   };
@@ -98,8 +106,10 @@ export type AnalysisResultLike = {
 
 // Two runs for the same token interleaving their delete-then-insert steps can
 // leave duplicated or missing child rows, so writes are queued per token. This
-// covers one process only: the API and the worker are separate processes and
-// still rely on the queue keying analysis jobs by token address.
+// covers one process only, and only the async API path goes through the queue:
+// POST /tokens/:address/analyze without `async` persists inside the API
+// process, so an API run and a worker run for the same token are not serialised
+// against each other at all. Closing that needs a database-level lock.
 const tokenWrites = new Map<string, Promise<unknown>>();
 
 /**
@@ -149,41 +159,53 @@ async function writeAnalysisResult(result: AnalysisResultLike) {
     holderCount: d.holderCount ?? existing?.holderCount ?? undefined,
   };
 
-  const common = {
+  const metadata = {
     ...carried,
     isProxy: d.isProxy,
     isVerified: d.isVerified,
     isActive: d.isActive ?? undefined,
+    hasRobinhoodLink: d.hasRobinhoodLink,
+  };
+
+  // The verdict and the freshness stamp are written after every child write has
+  // landed. Stamping them here let a failure in the holders or graph steps
+  // leave a current timestamp and a fresh risk grade standing over the previous
+  // run's holders, pools and edges, which /tokens/:address then reported as
+  // current.
+  const verdict = {
     overallRisk: d.overallRisk,
     confidence: d.confidence,
     topSignalsJson: jstr(d.topSignals),
-    hasRobinhoodLink: d.hasRobinhoodLink,
     analysisUpdatedAt: new Date(),
     lastAnalyzedBlock: result.report.lastBlock != null ? BigInt(result.report.lastBlock) : null,
   };
 
   const token = await prisma.token.upsert({
     where: { chain_address: { chain: d.chain, address: d.address } },
-    create: { chain: d.chain, address: d.address, ...common },
-    update: common,
+    create: { chain: d.chain, address: d.address, ...metadata },
+    update: metadata,
   });
 
-  await prisma.analysisRun.create({
-    data: {
-      tokenId: token.id,
-      modelVersion: result.report.modelVersion,
-      overallRisk: result.report.overall,
-      confidence: result.report.confidence,
-      reportJson: jstr(result.report),
-      lastBlock: result.report.lastBlock != null ? BigInt(result.report.lastBlock) : null,
-      dataSources: jstr(result.report.dataSources),
-    },
-  });
-
-  // Contract findings plus report findings, deduped. Storing only topFindings
-  // would silently drop everything past the eighth signal.
+  // report.categories holds every finding the run scored; topFindings is capped
+  // at eight, so storing that alone left the ninth signal with no row, and a
+  // finding with no row can never be reviewed or overridden. contractFindings
+  // is the fallback for a caller that passes no categories, and comes last so
+  // the scored copy of a finding wins: the scorer reclassifies a finding with
+  // no evidence to data_gaps, and that judgement is the one worth storing.
+  const scored = result.report.categories?.flatMap((c) => c.findings);
+  // A category the run could not read produces no findings either, so absence
+  // alone cannot tell a lapsed signal from an unread one. Only a category that
+  // was readable end to end may retire anything, otherwise an explorer outage
+  // marks a reviewed finding as no longer firing, which reads as the risk
+  // having gone away rather than as the gap it is.
+  const completeCategories = new Set(
+    (result.report.categories ?? [])
+      .filter((c) => c.dataComplete !== false)
+      .map((c) => c.category)
+      .filter((c): c is string => Boolean(c))
+  );
   const merged = new Map<string, Finding>();
-  for (const f of [...d.contractFindings, ...result.report.topFindings]) {
+  for (const f of [...(scored ?? []), ...result.report.topFindings, ...d.contractFindings]) {
     if (!merged.has(f.id)) merged.set(f.id, f);
   }
 
@@ -196,36 +218,70 @@ async function writeAnalysisResult(result: AnalysisResultLike) {
     // the reviewer's row stays the only one for that finding.
     const reviewed = await tx.finding.findMany({
       where: { tokenId: token.id, source: "automatic", manualAt: { not: null } },
-      select: { id: true, category: true, name: true, controllerAddress: true },
+      select: { id: true, category: true, name: true },
     });
-    const key = (f: { category: string; name: string; controllerAddress?: string | null }) =>
-      `${f.category}::${f.name}::${f.controllerAddress ?? ""}`;
-    const reviewedIds = new Map(reviewed.map((f) => [key(f), f.id]));
+    // controllerAddress used to be part of this key. It comes from owner(),
+    // whose read is allowed to fail, so a run where the node did not answer
+    // missed the reviewed row and inserted a second copy of the same finding
+    // beside it. The current reading is written into the row instead.
+    const key = (f: { category: string; name: string }) => `${f.category}::${f.name}`;
+    // Duplicates created before that fix can still exist, and keeping only one
+    // id per key would leave the others frozen at their review-time severity.
+    const reviewedIds = new Map<string, string[]>();
+    for (const f of reviewed) {
+      const group = reviewedIds.get(key(f));
+      if (group) group.push(f.id);
+      else reviewedIds.set(key(f), [f.id]);
+    }
     await tx.finding.deleteMany({
       where: { tokenId: token.id, source: "automatic", manualAt: null },
     });
     const fresh: Finding[] = [];
+    const reproduced = new Set<string>();
     for (const f of merged.values()) {
-      const reviewedId = reviewedIds.get(key(f));
-      if (!reviewedId) {
+      const ids = reviewedIds.get(key(f));
+      if (!ids) {
         fresh.push(f);
         continue;
       }
+      reproduced.add(key(f));
       // Severity and summary for several findings scale with the measured
       // value, so discarding the fresh detection would pin a reviewed row to
       // the numbers it carried at review time and hide any later escalation.
       // The manual* columns are untouched, so the decision itself survives.
-      await tx.finding.update({
-        where: { id: reviewedId },
-        data: {
-          severity: f.severity,
-          status: f.status,
-          summary: f.summary,
-          whyItMatters: f.whyItMatters,
-          relatedFunction: f.relatedFunction,
-          evidenceJson: jstr(f.evidence),
-        },
-      });
+      for (const id of ids) {
+        await tx.finding.update({
+          where: { id },
+          data: {
+            severity: f.severity,
+            status: f.status,
+            summary: f.summary,
+            whyItMatters: f.whyItMatters,
+            controllerAddress: f.controllerAddress,
+            relatedFunction: f.relatedFunction,
+            evidenceJson: jstr(f.evidence),
+            // The signal is firing again, so it is not retired.
+            retiredAt: null,
+          },
+        });
+      }
+    }
+    // deleteMany excludes reviewed rows, so a reviewed finding the detector
+    // stopped producing used to be served as a current signal forever. It is
+    // marked instead of deleted so the reviewer's decision survives next to the
+    // fact that the signal lapsed. Only a complete finding set may retire a
+    // row: with topFindings alone a ninth-ranked signal is missing, not gone,
+    // and within that set only a category that was actually readable.
+    if (scored) {
+      const lapsed = reviewed.filter(
+        (f) => !reproduced.has(key(f)) && completeCategories.has(f.category)
+      );
+      if (lapsed.length) {
+        await tx.finding.updateMany({
+          where: { id: { in: lapsed.map((f) => f.id) } },
+          data: { retiredAt: new Date() },
+        });
+      }
     }
     if (fresh.length) {
       await tx.finding.createMany({
@@ -263,11 +319,16 @@ async function writeAnalysisResult(result: AnalysisResultLike) {
     });
   }
 
+  // An explorer that repeats a holder across pages would break the insert on
+  // @@unique([tokenId, address]) and roll the whole snapshot back, leaving the
+  // previous run's holders in place.
+  const holders = [...new Map(d.holders.map((h) => [h.address.toLowerCase(), h])).values()];
+
   await prisma.$transaction(async (tx) => {
     await tx.tokenHolder.deleteMany({ where: { tokenId: token.id } });
-    if (d.holders.length) {
+    if (holders.length) {
       await tx.tokenHolder.createMany({
-        data: d.holders.map((h) => ({
+        data: holders.map((h) => ({
           tokenId: token.id,
           address: h.address,
           balance: h.balance,
@@ -306,7 +367,8 @@ async function writeAnalysisResult(result: AnalysisResultLike) {
     tokenId: token.id,
     tokenAddress: d.address,
     chain: d.chain,
-    findings: result.report.topFindings,
+    findings: [...merged.values()],
+    completeCategories: scored ? [...completeCategories] : null,
   });
 
   if (d.bytecodeHash) {
@@ -314,38 +376,50 @@ async function writeAnalysisResult(result: AnalysisResultLike) {
       where: { bytecodeHash: d.bytecodeHash, id: { not: token.id } },
       take: 20,
     });
-    for (const other of reused) {
-      const fingerprint = `${d.chain}:${d.address}:${other.address}:copied_contract`.toLowerCase();
+    if (reused.length) {
       const evidenceJson = jstr([{ type: "bytecode", chain: d.chain, value: d.bytecodeHash }]);
-      await prisma.graphEdgeRow.upsert({
-        where: { fingerprint },
-        create: {
-          fingerprint,
-          sourceId: d.address,
-          targetId: other.address,
-          sourceType: "token",
-          targetType: "token",
-          edgeType: "copied_contract",
-          strength: "definitive",
-          chain: d.chain,
-          confidence: "high",
-          evidenceJson,
-          label: "identical deployed bytecode",
-        },
-        update: { evidenceJson },
-      });
+      // A token from a common template fills all twenty of these, and they
+      // differ only by fingerprint, so they go as one round trip rather than
+      // twenty while the request waits.
+      await prisma.$transaction(
+        reused.map((other) => {
+          const fingerprint = `${d.chain}:${d.address}:${other.address}:copied_contract`.toLowerCase();
+          return prisma.graphEdgeRow.upsert({
+            where: { fingerprint },
+            create: {
+              fingerprint,
+              sourceId: d.address,
+              targetId: other.address,
+              sourceType: "token",
+              targetType: "token",
+              edgeType: "copied_contract",
+              strength: "definitive",
+              chain: d.chain,
+              confidence: "high",
+              evidenceJson,
+              label: "identical deployed bytecode",
+            },
+            update: { evidenceJson },
+          });
+        })
+      );
     }
   }
 
-  // Re-analysing a token used to append a duplicate row per link every run.
-  // The snapshot is replaced instead.
+  // Re-analysing a token used to append a duplicate row per link every run, so
+  // the snapshot is replaced. It is scoped by token id: the links point at the
+  // deployer and the top holders as often as at the token, so deleting by
+  // address also threw away the snapshot of every sibling token from the same
+  // deployer. Rows written before tokenId existed carry null and are matched by
+  // this token's own address.
   await prisma.$transaction(async (tx) => {
     await tx.crossChainLinkRow.deleteMany({
-      where: { fromAddress: { in: [d.address, ...(d.deployer ? [d.deployer] : [])] } },
+      where: { OR: [{ tokenId: token.id }, { tokenId: null, fromAddress: d.address }] },
     });
     if (d.crossChainLinks.length) {
       await tx.crossChainLinkRow.createMany({
         data: d.crossChainLinks.map((l) => ({
+          tokenId: token.id,
           strength: l.strength,
           fromChain: l.fromChain,
           toChain: l.toChain,
@@ -374,9 +448,28 @@ async function writeAnalysisResult(result: AnalysisResultLike) {
       update: {
         firstFunder: d.deployerProfile?.firstFunder,
         historyLabel: d.deployerProfile?.historyLabel,
+        // firstSeenAt is deliberately left alone: it records the earliest
+        // observation and a later run cannot improve on it. lastSeenAt froze at
+        // creation, which described every known deployer as dormant.
+        lastSeenAt: d.deployerProfile?.lastSeenAt ? new Date(d.deployerProfile.lastSeenAt) : undefined,
       },
     });
   }
 
-  return token;
+  // Last, so that the freshness stamp and the risk grade only ever describe a
+  // run whose children all landed. A failure above leaves the previous verdict
+  // and timestamp in place, which reads as stale rather than as current.
+  await prisma.analysisRun.create({
+    data: {
+      tokenId: token.id,
+      modelVersion: result.report.modelVersion,
+      overallRisk: result.report.overall,
+      confidence: result.report.confidence,
+      reportJson: jstr(result.report),
+      lastBlock: result.report.lastBlock != null ? BigInt(result.report.lastBlock) : null,
+      dataSources: jstr(result.report.dataSources),
+    },
+  });
+
+  return prisma.token.update({ where: { id: token.id }, data: verdict });
 }

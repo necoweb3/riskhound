@@ -81,38 +81,83 @@ async function ingest(signature: Signature): Promise<IngestResult> {
   return "ingested";
 }
 
+/**
+ * Circle indexes a confirmed signature within minutes, so "no message" only
+ * becomes a final answer once the signature is past this window. Before that it
+ * is a race with Circle's own indexer and has to be asked again.
+ */
+const RESOLVE_GRACE_MS = 15 * 60 * 1000;
+
+/**
+ * May a signature Circle had no message for be retired from the rotation?
+ *
+ * A failed transaction can never carry a burn. Anything else is only final once
+ * Circle has had time to index it, and a signature the ledger has not
+ * timestamped yet is the newest kind there is, so it cannot have outlived that
+ * window. Retiring it is permanent, so an unknown blockTime has to mean no.
+ */
+export function canRetireSignature(signature: Signature, now = Date.now()) {
+  if (signature.err) return true;
+  if (signature.blockTime == null) return false;
+  return now - signature.blockTime * 1000 >= RESOLVE_GRACE_MS;
+}
+
+/** How many settled signatures to carry in the cursor. */
+const RESOLVED_MEMORY = 500;
+/** Circle lookups in flight at once. The loop is entirely network-bound. */
+const CIRCLE_CONCURRENCY = 5;
+
 export async function runSolanaCctpIndexer() {
   const cursorRow = await prisma.indexerCursor.findUnique({ where: { key: "solana_cctp_backfill" } });
-  const before = cursorRow?.metaJson ? JSON.parse(cursorRow.metaJson).before as string | undefined : undefined;
+  const meta = (cursorRow?.metaJson ? JSON.parse(cursorRow.metaJson) : {}) as { before?: string; resolved?: unknown };
+  const before = meta.before;
+  const resolved = new Set<string>(Array.isArray(meta.resolved) ? (meta.resolved as string[]) : []);
   const [recent, historical] = await Promise.all([
     rpc("getSignaturesForAddress", [PROGRAM, { limit: 20, commitment: "confirmed" }]) as Promise<Signature[]>,
     rpc("getSignaturesForAddress", [PROGRAM, { limit: 40, commitment: "confirmed", ...(before ? { before } : {}) }]) as Promise<Signature[]>,
   ]);
   const unique = [...new Map([...recent, ...historical].map((item) => [item.signature, item])).values()];
+  // The newest signatures barely move between polls, so most of this page was
+  // being re-asked at Circle every two minutes for an answer already had.
+  const pending = unique.filter((item) => !resolved.has(item.signature));
   let matched = 0;
   const unread = new Set<string>();
-  for (const signature of unique) {
-    const result = await ingest(signature);
-    if (result === "ingested") matched++;
-    else if (result === "failed") unread.add(signature.signature);
-  }
+  let next = 0;
+  const drain = async () => {
+    for (;;) {
+      const signature = pending[next++];
+      if (!signature) return;
+      const result = await ingest(signature);
+      // An ingested signature keeps being re-read: its Circle status can still
+      // move from pending to complete, and only a re-read would show that.
+      if (result === "ingested") matched++;
+      else if (result === "failed") unread.add(signature.signature);
+      else if (canRetireSignature(signature)) resolved.add(signature.signature);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(CIRCLE_CONCURRENCY, pending.length) }, drain));
+  // Keep signatures still being shown at the fresh end, so the cap evicts old
+  // history rather than the page that is re-read on every tick.
+  for (const item of unique) if (resolved.delete(item.signature)) resolved.add(item.signature);
+  const nextResolved = [...resolved].slice(-RESOLVED_MEMORY);
+
   // Moving `before` past a signature Circle would not answer for drops it from
   // the backfill permanently, so hold the cursor until the page reads cleanly.
   const historyIncomplete = historical.some((item) => unread.has(item.signature));
   const nextBefore = historyIncomplete ? before ?? null : historical.at(-1)?.signature ?? before ?? null;
   await prisma.indexerCursor.upsert({
     where: { key: "solana_cctp_backfill" },
-    create: { key: "solana_cctp_backfill", lastAt: new Date(), metaJson: JSON.stringify({ before: nextBefore }) },
-    update: { lastAt: new Date(), metaJson: JSON.stringify({ before: nextBefore }) },
+    create: { key: "solana_cctp_backfill", lastAt: new Date(), metaJson: JSON.stringify({ before: nextBefore, resolved: nextResolved }) },
+    update: { lastAt: new Date(), metaJson: JSON.stringify({ before: nextBefore, resolved: nextResolved }) },
   });
   // Signatures Circle would not answer for are burns we cannot see, so a run
   // holding any of them is not a clean pass over the source.
   const healthy = unread.size === 0;
-  const lastError = healthy ? null : `${unread.size} of ${unique.length} signatures could not be read from Circle.`;
+  const lastError = healthy ? null : `${unread.size} of ${pending.length} signatures could not be read from Circle.`;
   await prisma.dataSourceHealth.upsert({
     where: { key: "solana_cctp" },
-    create: { key: "solana_cctp", name: "Solana CCTP V2", healthy, lastSuccessAt: healthy ? new Date() : null, lastError, metaJson: JSON.stringify({ checked: unique.length, matched, unread: unread.size }) },
-    update: { healthy, lastSuccessAt: healthy ? new Date() : undefined, lastError, metaJson: JSON.stringify({ checked: unique.length, matched, unread: unread.size }) },
+    create: { key: "solana_cctp", name: "Solana CCTP V2", healthy, lastSuccessAt: healthy ? new Date() : null, lastError, metaJson: JSON.stringify({ seen: unique.length, checked: pending.length, matched, unread: unread.size }) },
+    update: { healthy, lastSuccessAt: healthy ? new Date() : undefined, lastError, metaJson: JSON.stringify({ seen: unique.length, checked: pending.length, matched, unread: unread.size }) },
   });
-  return { checked: unique.length, matched, unread: unread.size };
+  return { checked: pending.length, matched, unread: unread.size };
 }

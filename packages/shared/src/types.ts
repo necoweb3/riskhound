@@ -292,21 +292,3 @@ export interface AppealRecord {
   createdAt: string;
   updatedAt: string;
 }
-
-export interface ApiQuote {
-  endpoint: string;
-  priceUsdc: string;
-  network: string;
-  chainId: number;
-  recipient: string;
-  asset: string;
-  maxSpendUsdc: string;
-  expiresAt: string;
-}
-
-export interface PaidAnalysisResponse<T> {
-  paid: boolean;
-  quote?: ApiQuote;
-  result?: T;
-  paymentNetwork?: string;
-}

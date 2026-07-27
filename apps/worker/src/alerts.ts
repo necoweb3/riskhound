@@ -6,7 +6,13 @@ export async function runAlertEngine() {
   // The same recent risk events apply to every watched wallet, so read them
   // once and in a deterministic order instead of per watchlist row.
   const recentEvents = await prisma.riskEvent.findMany({
-    where: { createdAt: { gte: new Date(Date.now() - 6 * 3600 * 1000) } },
+    where: {
+      createdAt: { gte: new Date(Date.now() - 6 * 3600 * 1000) },
+      // Auto-detected events are filed pending and say so in their own detail.
+      // Alerting on them named a wallet in an accusation no reviewer had seen,
+      // which is the same filter analyzeJob applies before a warning is scored.
+      manualStatus: "confirmed",
+    },
     orderBy: { createdAt: "desc" },
     take: 50,
   });
@@ -31,22 +37,49 @@ type Watch = { userId: string; entityType: string; chain: string; address: strin
 type RecentEvent = {
   id: string;
   eventClass: string;
+  confidence: string;
   title: string;
   detail: string | null;
   addressesJson: string;
   evidenceJson: string;
 };
 
+const tokenKey = (chain: string, address: string) => `${chain}:${address}`;
+
 async function processWatches(watches: Watch[], recentEvents: RecentEvent[]) {
+  // One read for the page instead of one per row, selecting only what is used
+  // below: the previous include dragged back two full analysis reports per
+  // watchlist item and never looked at them.
+  const watched = [
+    ...new Map(
+      watches
+        .filter((w) => w.entityType === "token")
+        .map((w) => [tokenKey(w.chain, w.address), w])
+    ).values(),
+  ];
+  const tokenRows = watched.length
+    ? await prisma.token.findMany({
+        where: { OR: watched.map((w) => ({ chain: w.chain, address: w.address })) },
+        select: {
+          chain: true,
+          address: true,
+          symbol: true,
+          overallRisk: true,
+          topSignalsJson: true,
+          hasRobinhoodLink: true,
+          simulations: {
+            orderBy: { createdAt: "desc" },
+            take: 1,
+            select: { id: true, canBuy: true, canSell: true, summary: true },
+          },
+        },
+      })
+    : [];
+  const tokensByKey = new Map(tokenRows.map((t) => [tokenKey(t.chain, t.address), t]));
+
   for (const w of watches) {
     if (w.entityType === "token") {
-      const token = await prisma.token.findUnique({
-        where: { chain_address: { chain: w.chain, address: w.address } },
-        include: {
-          simulations: { orderBy: { createdAt: "desc" }, take: 2 },
-          analyses: { orderBy: { createdAt: "desc" }, take: 2 },
-        },
-      });
+      const token = tokensByKey.get(tokenKey(w.chain, w.address));
       if (!token) continue;
 
       if (token.overallRisk === "critical_risk" || token.overallRisk === "high_risk") {
@@ -110,7 +143,14 @@ async function processWatches(watches: Watch[], recentEvents: RecentEvent[]) {
           chain: w.chain,
           address: w.address,
           type: "wallet_risk_event",
-          severity: e.eventClass === "confirmed_malicious" ? "critical" : "high",
+          // A reviewed event can still be a weak correlation, and a weak
+          // correlation is not a critical accusation against the wallet.
+          severity:
+            e.confidence === "low"
+              ? "medium"
+              : e.eventClass === "confirmed_malicious"
+                ? "critical"
+                : "high",
           title: e.title,
           body: e.detail ?? e.eventClass,
           evidence: jparse(e.evidenceJson, []),
@@ -134,8 +174,11 @@ async function emit(a: {
   dedupeKey: string;
 }) {
   try {
-    await prisma.alert.create({
-      data: {
+    // The dedupe keys are stable across runs, so a plain create was a
+    // guaranteed constraint violation on every tick after the first.
+    await prisma.alert.upsert({
+      where: { dedupeKey: a.dedupeKey },
+      create: {
         userId: a.userId,
         entityType: a.entityType,
         chain: a.chain,
@@ -147,10 +190,12 @@ async function emit(a: {
         evidenceJson: jstr(a.evidence),
         dedupeKey: a.dedupeKey,
       },
+      // An alert the user has already seen must not be resurrected or reworded.
+      update: {},
     });
   } catch (e) {
-    // P2002 is the dedupeKey collision this relies on. Anything else is a real
-    // write failure and must be visible rather than dropped.
+    // Two ticks can still race on the same key. Anything else is a real write
+    // failure and must be visible rather than dropped.
     if ((e as { code?: string })?.code === "P2002") return;
     console.error("[alerts] emit failed", a.dedupeKey, e instanceof Error ? e.message : e);
   }

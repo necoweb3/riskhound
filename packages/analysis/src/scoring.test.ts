@@ -10,10 +10,38 @@ describe("buildRiskReport", () => {
         { key: "arc", name: "Arc", healthy: true, usedInThisAnalysis: true },
       ],
       lastBlock: 1,
+      // The pipeline always supplies this, and it is what gives the derived
+      // honeypot finding an onchain reference to stand on.
+      tokenAddress: "0xtoken",
       buySellFindingHints: { canBuy: true, canSell: false, dataComplete: true },
     });
     expect(report.overall).toBe("critical_risk");
     expect(report.topFindings.some((f) => f.name.includes("Sell path"))).toBe(true);
+  });
+
+  it("does not let an evidence-less critical force a critical verdict", () => {
+    const report = buildRiskReport({
+      findings: [
+        {
+          id: "bare-critical",
+          category: "contract",
+          name: "Claim without a reference",
+          severity: "critical",
+          status: "observed",
+          summary: "s",
+          whyItMatters: "w",
+          evidence: [],
+          source: "automatic",
+        },
+      ],
+      dataSources: [{ key: "arc", name: "Arc", healthy: true, usedInThisAnalysis: true }],
+      lastBlock: 1,
+    });
+
+    // It stays visible as a gap, but a verdict nobody can check onchain is
+    // exactly what the evidence guard exists to prevent.
+    expect(report.overall).not.toBe("critical_risk");
+    expect(report.topFindings.map((f) => f.id)).toContain("bare-critical");
   });
 
   it("includes limited history without calling it low risk", () => {

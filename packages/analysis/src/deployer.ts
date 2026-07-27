@@ -62,13 +62,18 @@ export async function buildDeployerProfile(opts: {
 
       // first funder: look at oldest inbound native transfer pattern via reverse scan
       // Blockscout tx list may not include internal; approximate with first from != self
-      for (let i = items.length - 1; i >= 0; i--) {
-        const tx = items[i];
-        const from = typeof tx.from === "string" ? tx.from : tx.from?.hash;
-        const to = typeof tx.to === "string" ? tx.to : tx.to?.hash;
-        if (from && to && to.toLowerCase() === address && from.toLowerCase() !== address) {
-          firstFunder = from.toLowerCase();
-          break;
+      // Same dependency as firstSeenAt: with the cursor still open the oldest
+      // inbound row here is only the oldest on this page, and the graph draws
+      // it as the deployer's funding source with strength "strong".
+      if (historyComplete) {
+        for (let i = items.length - 1; i >= 0; i--) {
+          const tx = items[i];
+          const from = typeof tx.from === "string" ? tx.from : tx.from?.hash;
+          const to = typeof tx.to === "string" ? tx.to : tx.to?.hash;
+          if (from && to && to.toLowerCase() === address && from.toLowerCase() !== address) {
+            firstFunder = from.toLowerCase();
+            break;
+          }
         }
       }
     }
@@ -76,18 +81,23 @@ export async function buildDeployerProfile(opts: {
     // leave limited history
   }
 
-  // Enrich previous tokens with names (cap 10)
-  for (const t of previousTokens.slice(0, 10)) {
-    try {
-      const info = await opts.explorer.getToken(t.address);
-      if (info) {
-        t.name = info.name ?? null;
-        t.symbol = info.symbol ?? null;
+  // Enrich previous tokens with names (cap 10). Nothing here depends on the
+  // previous lookup, and a serial deployer paid ten explorer round trips in a
+  // row purely to fill two display strings. The per-token catch stays so one
+  // 404 does not lose the other names.
+  await Promise.all(
+    previousTokens.slice(0, 10).map(async (t) => {
+      try {
+        const info = await opts.explorer.getToken(t.address);
+        if (info) {
+          t.name = info.name ?? null;
+          t.symbol = info.symbol ?? null;
+        }
+      } catch {
+        /* ignore */
       }
-    } catch {
-      /* ignore */
-    }
-  }
+    })
+  );
 
   let ageDays: number | null = null;
   if (firstSeenAt) {

@@ -9,6 +9,7 @@ import {
   getAddress,
   isAddress,
   keccak256,
+  toFunctionSelector,
 } from "viem";
 import type { NetworkConfig } from "@rugkiller/shared";
 
@@ -25,42 +26,74 @@ const ERC20_ABI = [
   { type: "function", name: "paused", stateMutability: "view", inputs: [], outputs: [{ type: "bool" }] },
 ] as const;
 
-/** Common privilege selectors for bytecode scanning */
-export const RISK_SELECTORS: Record<string, string> = {
+/**
+ * Privileged, state-changing functions worth reporting when the dispatcher
+ * pushes their selector.
+ *
+ * The table is derived from the signatures at load rather than written as
+ * literal selectors: several hand-written pairs hashed to a different function
+ * than the label they carried, so the product named a privileged function it
+ * had not found and the selector in the evidence ref did not check out against
+ * the signature beside it. Anything that cannot be derived here does not
+ * belong here.
+ */
+const PRIVILEGED_SIGNATURES = [
   // mint / supply
-  "40c10f19": "mint(address,uint256)",
-  "a0712d68": "mint(uint256)",
-  "449a52f8": "mintTo(address,uint256)",
+  "mint(address,uint256)",
+  "mint(uint256)",
+  "mintTo(address,uint256)",
   // pause / blacklist
-  "8456cb59": "pause()",
-  "3f4ba83a": "unpause()",
-  "f9f92be4": "blacklist(address)",
-  "e4997dc5": "addBlackList(address)",
-  "0ecb93c0": "addToBlacklist(address)",
-  "c3f909d4": "setBlacklistEnabled(bool)",
+  "pause()",
+  "unpause()",
+  "blacklist(address)",
+  "addBlackList(address)",
+  "removeBlackList(address)",
+  "addToBlacklist(address)",
+  "setBlacklistEnabled(bool)",
   // trading / max
-  "8da5cb5b": "owner()",
-  "715018a6": "renounceOwnership()",
-  "f2fde38b": "transferOwnership(address)",
-  "53d1c0d2": "setMaxTxAmount(uint256)",
-  "7d1db4a5": "setMaxTxPercent(uint256)",
-  "ec28438a": "setMaxTxAmount(uint256)",
-  "cc1776d3": "setSellFee(uint256)",
-  "c49b9a80": "setSwapAndLiquifyEnabled(bool)",
+  "transferOwnership(address)",
+  "setMaxTxAmount(uint256)",
+  "setMaxTxPercent(uint256)",
+  "setSellFee(uint256)",
+  "setSwapAndLiquifyEnabled(bool)",
   // taxes
-  "061c82d0": "setTaxFee(uint256)",
-  "15ce80d0": "setLiquidityFee(uint256)",
+  "setTaxFee(uint256)",
+  "setTaxFeePercent(uint256)",
+  "setLiquidityFee(uint256)",
   // force transfer / admin
-  "79cc6790": "burnFrom(address,uint256)",
-  "23b872dd": "transferFrom(address,address,uint256)",
-  "a9059cbb": "transfer(address,uint256)",
+  "burnFrom(address,uint256)",
   // proxy
-  "3659cfe6": "upgradeTo(address)",
-  "4f1ef286": "upgradeToAndCall(address,bytes)",
-  "8f283970": "changeAdmin(address)",
-  "f851a440": "admin()",
-  "5c60da1b": "implementation()",
-};
+  "upgradeTo(address)",
+  "upgradeToAndCall(address,bytes)",
+  "changeAdmin(address)",
+] as const;
+
+/**
+ * Mandatory ERC-20 entry points and read-only getters. Every conforming token
+ * has these, so their presence is not a risk signal and reporting them as one
+ * gave a plain token with ownership renounced a page full of privileged
+ * functions. They stay in their own table for the ERC-20 shape heuristic.
+ */
+const STANDARD_SIGNATURES = [
+  "transfer(address,uint256)",
+  "transferFrom(address,address,uint256)",
+  "balanceOf(address)",
+  "totalSupply()",
+  "owner()",
+  "renounceOwnership()",
+  "admin()",
+  "implementation()",
+] as const;
+
+function selectorTable(signatures: readonly string[]): Record<string, string> {
+  return Object.fromEntries(signatures.map((sig) => [toFunctionSelector(sig).slice(2), sig]));
+}
+
+/** Privilege selectors for bytecode scanning, keyed by selector without 0x. */
+export const RISK_SELECTORS: Record<string, string> = selectorTable(PRIVILEGED_SIGNATURES);
+
+/** Non-privileged ERC-20 / getter selectors, keyed by selector without 0x. */
+export const STANDARD_SELECTORS: Record<string, string> = selectorTable(STANDARD_SIGNATURES);
 
 export function networkToViemChain(network: NetworkConfig): Chain {
   return {
@@ -153,7 +186,13 @@ export async function probeCode(client: PublicClient, address: Address): Promise
   }
 }
 
-/** Convenience wrapper for callers that only need the bytecode when present. */
+/**
+ * @deprecated Collapses a failed read to null, which is the conflation the
+ * comment above forbids. Both remaining callers do draw a conclusion from the
+ * null (apps/worker/src/arcDiscovery.ts skips the address and still commits the
+ * block cursor, apps/api/src/routes/tokens.ts answers 404 "no contract here"),
+ * so both need converting to probeCode before this can go.
+ */
 export async function getCode(client: PublicClient, address: Address): Promise<Hex | null> {
   const probe = await probeCode(client, address);
   return probe.ok ? probe.code : null;
@@ -171,10 +210,10 @@ function includesAtByteBoundary(hex: string, needle: string): boolean {
   return false;
 }
 
-export function scanSelectors(code: Hex): { selector: string; signature: string }[] {
+function scanTable(code: Hex, table: Record<string, string>): { selector: string; signature: string }[] {
   const hex = code.slice(2).toLowerCase();
   const found: { selector: string; signature: string }[] = [];
-  for (const [sel, sig] of Object.entries(RISK_SELECTORS)) {
+  for (const [sel, sig] of Object.entries(table)) {
     // A dispatcher can only route to a selector it pushes, so require the
     // PUSH4 opcode (0x63) immediately before it and require the match to land
     // on a byte boundary. A bare substring search also hits constants, address
@@ -184,6 +223,16 @@ export function scanSelectors(code: Hex): { selector: string; signature: string 
     }
   }
   return found;
+}
+
+/** Privileged functions found in the dispatcher. Never plain ERC-20 entry points. */
+export function scanSelectors(code: Hex): { selector: string; signature: string }[] {
+  return scanTable(code, RISK_SELECTORS);
+}
+
+/** ERC-20 / getter selectors, for shape detection rather than risk reporting. */
+export function scanStandardSelectors(code: Hex): { selector: string; signature: string }[] {
+  return scanTable(code, STANDARD_SELECTORS);
 }
 
 export function detectProxyHints(code: Hex): {
@@ -196,7 +245,10 @@ export function detectProxyHints(code: Hex): {
   if (hex.includes("360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc")) {
     reasons.push("EIP-1967 implementation slot constant present");
   }
-  if (hex.includes("3659cfe6") || hex.includes("4f1ef286")) {
+  // Same rule as scanSelectors: a bare four-byte search also hits constants and
+  // packed data, and the two functions disagreeing about the same bytecode is
+  // how a non-upgradeable token got a high "Upgradeable contract" signal.
+  if (includesAtByteBoundary(hex, "633659cfe6") || includesAtByteBoundary(hex, "634f1ef286")) {
     reasons.push("upgradeTo / upgradeToAndCall selector present");
   }
   // minimal proxy (EIP-1167) prefix

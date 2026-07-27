@@ -1,5 +1,5 @@
 import type { FastifyInstance } from "fastify";
-import { z } from "zod";
+import { z, ZodError } from "zod";
 import { prisma, jparse } from "@rugkiller/db";
 import { analyzeToken } from "@rugkiller/analysis";
 import { getArcClients, getCode, normalizeAddress, readErc20Meta } from "@rugkiller/chain";
@@ -107,7 +107,9 @@ export async function tokenRoutes(app: FastifyInstance) {
         ];
       }
 
-      const [items, total] = await Promise.all([
+      // dataHealth depends on neither of the other two, so awaiting it after
+      // them only added a serial round trip.
+      const [items, total, dataHealth] = await Promise.all([
         prisma.token.findMany({
           where: baseWhere,
           orderBy,
@@ -115,6 +117,7 @@ export async function tokenRoutes(app: FastifyInstance) {
           skip: q.offset,
         }),
         prisma.token.count({ where: baseWhere }),
+        prisma.dataSourceHealth.findMany(),
       ]);
 
       return {
@@ -123,75 +126,50 @@ export async function tokenRoutes(app: FastifyInstance) {
         // every token that matches the term.
         searchTruncated,
         items: items.map(tokenRowToSummary),
-        dataHealth: await prisma.dataSourceHealth.findMany(),
+        dataHealth,
       };
     } catch (e) {
-      const message = e instanceof Error ? e.message : "Failed to list tokens";
-      return reply.code(400).send({ error: "list_failed", message });
+      // Only a rejected query string is the caller's fault. A database outage
+      // reported as 400 tells clients not to retry a server failure, and the
+      // driver message names the internal host, so it goes to the shared
+      // handler that hides it behind a 500.
+      if (!(e instanceof ZodError)) throw e;
+      return reply.code(400).send({ error: "list_failed", message: e.message });
     }
   });
 
   app.get("/tokens/:address", async (req, reply) => {
-    try {
-      const { address } = req.params as { address: string };
-      const norm = normalizeAddress(address);
-      if (!norm) return reply.code(400).send({ error: "invalid_address", message: "Invalid address" });
+    // Every failure in here is internal and its message carries driver and
+    // host detail, so it goes to the shared handler that hides it behind a
+    // 500 rather than being echoed back.
+    const { address } = req.params as { address: string };
+    const norm = normalizeAddress(address);
+    if (!norm) return reply.code(400).send({ error: "invalid_address", message: "Invalid address" });
 
-      const row = await prisma.token.findUnique({
-        where: { chain_address: { chain: "arc_testnet", address: norm.toLowerCase() } },
-        include: {
-          analyses: { orderBy: { createdAt: "desc" }, take: 1 },
-          findings: true,
-          holders: { orderBy: { pct: "desc" }, take: 50 },
-          simulations: { orderBy: { createdAt: "desc" }, take: 1 },
-          pools: true,
-        },
+    const row = await prisma.token.findUnique({
+      where: { chain_address: { chain: "arc_testnet", address: norm.toLowerCase() } },
+      include: {
+        analyses: { orderBy: { createdAt: "desc" }, take: 1 },
+        findings: true,
+        holders: { orderBy: { pct: "desc" }, take: 50 },
+        simulations: { orderBy: { createdAt: "desc" }, take: 1 },
+        pools: true,
+      },
+    });
+
+    if (!row) {
+      return reply.code(404).send({
+        error: "token_not_found",
+        message: "Token not found",
+        address: norm,
       });
+    }
 
-      if (!row) {
-        return reply.code(404).send({
-          error: "token_not_found",
-          message: "Token not found",
-          address: norm,
-        });
-      }
-
-      if (!row.analyses[0]) {
-        return {
-          summary: tokenRowToSummary(row),
-          report: null,
-          findings: [],
-          holders: row.holders.map((h) => ({
-            address: h.address,
-            balance: h.balance,
-            pct: h.pct,
-            isContract: h.isContract,
-            labels: jparse(h.labelsJson, [] as string[]),
-          })),
-          simulation: null,
-          pools: row.pools,
-          stale: false,
-          analysisPending: true,
-          analysisUpdatedAt: null,
-        };
-      }
-
-      const report = jparse(row.analyses[0].reportJson, null);
+    if (!row.analyses[0]) {
       return {
         summary: tokenRowToSummary(row),
-        report,
-        findings: row.findings.map((f) => ({
-          id: f.id,
-          name: f.name,
-          severity: f.severity,
-          status: f.status,
-          summary: f.summary,
-          whyItMatters: f.whyItMatters,
-          category: f.category,
-          relatedFunction: f.relatedFunction,
-          controllerAddress: f.controllerAddress,
-          evidence: jparse(f.evidenceJson, []),
-        })),
+        report: null,
+        findings: [],
         holders: row.holders.map((h) => ({
           address: h.address,
           balance: h.balance,
@@ -199,28 +177,55 @@ export async function tokenRoutes(app: FastifyInstance) {
           isContract: h.isContract,
           labels: jparse(h.labelsJson, [] as string[]),
         })),
-        simulation: row.simulations[0]
-          ? {
-              canBuy: row.simulations[0].canBuy,
-              canSell: row.simulations[0].canSell,
-              buyTaxBps: row.simulations[0].buyTaxBps,
-              sellTaxBps: row.simulations[0].sellTaxBps,
-              summary: row.simulations[0].summary,
-              method: row.simulations[0].method,
-              dataComplete: row.simulations[0].dataComplete,
-              steps: jparse(row.simulations[0].stepsJson, []),
-            }
-          : null,
+        simulation: null,
         pools: row.pools,
-        stale:
-          !row.analysisUpdatedAt ||
-          Date.now() - row.analysisUpdatedAt.getTime() > 15 * 60 * 1000,
-        analysisUpdatedAt: row.analysisUpdatedAt?.toISOString(),
+        stale: false,
+        analysisPending: true,
+        analysisUpdatedAt: null,
       };
-    } catch (e) {
-      const message = e instanceof Error ? e.message : "Failed to load token";
-      return reply.code(500).send({ error: "token_load_failed", message });
     }
+
+    const report = jparse(row.analyses[0].reportJson, null);
+    return {
+      summary: tokenRowToSummary(row),
+      report,
+      findings: row.findings.map((f) => ({
+        id: f.id,
+        name: f.name,
+        severity: f.severity,
+        status: f.status,
+        summary: f.summary,
+        whyItMatters: f.whyItMatters,
+        category: f.category,
+        relatedFunction: f.relatedFunction,
+        controllerAddress: f.controllerAddress,
+        evidence: jparse(f.evidenceJson, []),
+      })),
+      holders: row.holders.map((h) => ({
+        address: h.address,
+        balance: h.balance,
+        pct: h.pct,
+        isContract: h.isContract,
+        labels: jparse(h.labelsJson, [] as string[]),
+      })),
+      simulation: row.simulations[0]
+        ? {
+            canBuy: row.simulations[0].canBuy,
+            canSell: row.simulations[0].canSell,
+            buyTaxBps: row.simulations[0].buyTaxBps,
+            sellTaxBps: row.simulations[0].sellTaxBps,
+            summary: row.simulations[0].summary,
+            method: row.simulations[0].method,
+            dataComplete: row.simulations[0].dataComplete,
+            steps: jparse(row.simulations[0].stepsJson, []),
+          }
+        : null,
+      pools: row.pools,
+      stale:
+        !row.analysisUpdatedAt ||
+        Date.now() - row.analysisUpdatedAt.getTime() > 15 * 60 * 1000,
+      analysisUpdatedAt: row.analysisUpdatedAt?.toISOString(),
+    };
   });
 
   // A full analysis fans out to dozens of explorer and RPC calls and writes
@@ -293,9 +298,11 @@ export async function tokenRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: "invalid_address", message: "Invalid address" });
     }
     try {
+      const events = await loadRhRiskEventsForAddresses([]);
       const result = await analyzeToken({
         address: norm,
         skipSimulation: true,
+        rhRiskEvents: events,
       });
       return result.graph;
     } catch (e) {

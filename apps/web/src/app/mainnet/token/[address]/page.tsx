@@ -125,7 +125,7 @@ export default async function MainnetTokenPage({ params }: { params: Promise<{ a
           <div>
             <span className="rk-eyebrow">CREATOR INTELLIGENCE</span>
             <h2 className="rk-h2" style={{ marginTop: 6 }}>
-              {data.contract.creator ? <Link className="rk-inline-link rk-mono" href={`/wallet/${data.contract.creator}`}>{shortAddr(data.contract.creator)} <span aria-hidden="true">→</span></Link> : "Creator unavailable"}
+              {data.contract.creator ? <Link className="rk-address-link rk-address-link--inline rk-mono" href={`/wallet/${data.contract.creator}`}>{shortAddr(data.contract.creator)} <span aria-hidden="true">→</span></Link> : "Creator unavailable"}
             </h2>
           </div>
           {data.bridgeIntelligence.linked ? <span className="rk-badge rk-badge--high">Bridge-linked creator</span> : null}
@@ -161,7 +161,8 @@ export default async function MainnetTokenPage({ params }: { params: Promise<{ a
             <h2 className="rk-h2">Holder map</h2>
             <p className="rk-faint" style={{ margin: "0.35rem 0 0" }}>Bubble size is share of supply. Select a bubble to open the wallet.</p>
           </div>
-          <span className="rk-chip">{data.holders.length} holders tracked</span>
+          {/* An empty holder list is an unread index, not a token nobody holds. */}
+          <span className="rk-chip">{data.holders.length ? `${data.holders.length} holders tracked` : "Holder data unavailable"}</span>
         </div>
         <HolderBubbleMap holders={bubbleHolders} />
       </section>
@@ -170,7 +171,7 @@ export default async function MainnetTokenPage({ params }: { params: Promise<{ a
         <div className="rk-bridge-list">
           {data.holders.slice(0, 20).map((holder) => (
             <div className="rk-bridge-row" key={holder.address}>
-              <Link className="rk-inline-link rk-mono" href={`/wallet/${holder.address}`}>{shortAddr(holder.address)}</Link>
+              <Link className="rk-address-link rk-address-link--inline rk-mono" href={`/wallet/${holder.address}`}>{shortAddr(holder.address)}</Link>
               <span className="rk-mono">{holder.balance}</span>
             </div>
           ))}

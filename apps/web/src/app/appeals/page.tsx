@@ -36,9 +36,16 @@ export default function AppealsPage() {
           evidenceUrls: evidenceUrl.trim() ? [evidenceUrl.trim()] : [],
         }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.message ?? "The appeal could not be submitted.");
-      setMessage({ tone: "ok", text: `Appeal submitted. Reference: ${data.appeal?.id}` });
+      // An error response is not always JSON, so parsing first turns a 502 into
+      // a raw SyntaxError in the user's face.
+      const data = (await res.json().catch(() => null)) as { message?: string; appeal?: { id?: string } } | null;
+      if (!res.ok) throw new Error(data?.message ?? "The appeal could not be submitted.");
+      // Only quote a reference the reply actually carried, so an unreadable
+      // success body does not print "Reference: undefined".
+      setMessage({
+        tone: "ok",
+        text: data?.appeal?.id ? `Appeal submitted. Reference: ${data.appeal.id}` : "Appeal submitted.",
+      });
       setAddress("");
       setExplanation("");
       setEvidenceUrl("");

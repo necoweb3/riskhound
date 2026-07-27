@@ -1,5 +1,4 @@
 export * from "./contract.js";
-export * from "./simulation.js";
 export * from "./dex.js";
 export * from "./holders.js";
 export * from "./liquidity.js";

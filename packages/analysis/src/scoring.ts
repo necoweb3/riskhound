@@ -167,7 +167,10 @@ export function buildRiskReport(opts: {
     };
   });
 
-  const hasCritical = checked.some((f) => f.severity === "critical");
+  // requireEvidence relabels an unreferenced finding as a gap but leaves its
+  // severity alone, so without this filter a critical claim with nothing to
+  // show onchain would still force a critical_risk verdict.
+  const hasCritical = checked.some((f) => f.severity === "critical" && f.evidence.length > 0);
   const dataGapScore = categories.find((c) => c.category === "data_gaps")?.score ?? 0;
   const overall = aggregateOverall(categories, hasCritical, dataGapScore);
   const incompleteCategories = categories.filter((c) => !c.dataComplete).length;

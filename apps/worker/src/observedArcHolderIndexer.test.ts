@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { foldBalances, rankHolders } from "./observedArcHolderIndexer.js";
+import {
+  foldBalances,
+  isCleanRun,
+  orderByAttempt,
+  rankHolders,
+} from "./observedArcHolderIndexer.js";
 
 const A = "0x1111111111111111111111111111111111111111";
 const B = "0x2222222222222222222222222222222222222222";
@@ -81,5 +86,52 @@ describe("rankHolders", () => {
     // A negative total means a log was missed; it is not a holding.
     const out = rankHolders(new Map([[A, -5n], [B, 5n]]));
     expect(out.map(([a]) => a)).toEqual([B]);
+  });
+});
+
+describe("orderByAttempt", () => {
+  const tokens = [{ address: A }, { address: B }, { address: ZERO }];
+
+  it("puts a token that was never attempted ahead of one that was", () => {
+    const out = orderByAttempt(tokens, new Map([[A, 10], [B, 20]]));
+    expect(out.map((t) => t.address)).toEqual([ZERO, A, B]);
+  });
+
+  it("rotates a token that only ever skips instead of re-picking it", () => {
+    // The skip path writes the cursor, so the token that just skipped moves to
+    // the back. Ordering on Token.updatedAt left it at the front forever.
+    const attempted = new Map([[A, 100], [B, 50], [ZERO, 75]]);
+    expect(orderByAttempt(tokens, attempted)[0].address).toBe(B);
+    attempted.set(B, 200);
+    expect(orderByAttempt(tokens, attempted)[0].address).toBe(ZERO);
+  });
+
+  it("breaks ties on address so the batch is not arbitrary", () => {
+    const out = orderByAttempt(tokens, new Map());
+    expect(out.map((t) => t.address)).toEqual([ZERO, A, B]);
+  });
+});
+
+describe("isCleanRun", () => {
+  it("refuses to call an all-skipped run a success", () => {
+    // Skips are not errors, so failed=0 used to publish this as healthy with a
+    // fresh success timestamp over zero holder rows.
+    expect(isCleanRun({ considered: 3, failed: 0, indexed: 0, upToDate: 0 })).toBe(false);
+  });
+
+  it("accepts a run whose tokens had nothing left to scan", () => {
+    expect(isCleanRun({ considered: 3, failed: 0, indexed: 0, upToDate: 3 })).toBe(true);
+  });
+
+  it("refuses an empty inventory rather than reporting a pass over nothing", () => {
+    expect(isCleanRun({ considered: 0, failed: 0, indexed: 0, upToDate: 0 })).toBe(false);
+  });
+
+  it("refuses a run in which every token threw", () => {
+    expect(isCleanRun({ considered: 3, failed: 3, indexed: 0, upToDate: 0 })).toBe(false);
+  });
+
+  it("accepts a run that indexed something despite one failure", () => {
+    expect(isCleanRun({ considered: 3, failed: 1, indexed: 2, upToDate: 0 })).toBe(true);
   });
 });

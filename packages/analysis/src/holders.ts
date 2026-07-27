@@ -7,6 +7,21 @@ import type {
 } from "@rugkiller/shared";
 import { shouldIgnoreForOwnership } from "@rugkiller/shared";
 import type { BlockscoutClient } from "@rugkiller/chain";
+import { toBigInt } from "./dex.js";
+
+export type TokenTransferPage = Awaited<ReturnType<BlockscoutClient["getTokenTransfers"]>>;
+
+/**
+ * A token transfer page already read earlier in the same analysis, carrying
+ * whether the read succeeded. Passed down so one analysis does not fetch the
+ * same explorer URL twice, and so a failed read stays distinguishable from an
+ * empty one.
+ */
+export type PreloadedTransfers =
+  | { ok: true; page: TokenTransferPage }
+  | { ok: false; error: string };
+
+type FunderRow = { holder: HolderInfo; funder: string; txHash?: string };
 
 export interface HolderAnalysisResult {
   holders: HolderInfo[];
@@ -14,6 +29,10 @@ export interface HolderAnalysisResult {
   holderCount: number | null;
   /** False when the explorer cursor was still open at the page budget. */
   holderListComplete: boolean;
+  /** False when the transfer page behind the same-block bundle check failed. */
+  transferHistoryComplete: boolean;
+  /** False when the top-holder funding lookups did not all answer. */
+  funderScanComplete: boolean;
   top10Pct: number | null;
   deployerPct: number | null;
   clusters: InsiderCluster[];
@@ -40,6 +59,8 @@ export async function analyzeHolders(opts: {
    * and counting it flagged every liquid token as highly concentrated.
    */
   poolAddresses?: (string | null | undefined)[];
+  /** Transfer page already read for this token earlier in the same analysis. */
+  transfers?: PreloadedTransfers;
 }): Promise<HolderAnalysisResult> {
   const errors: string[] = [];
   const findings: RiskFinding[] = [];
@@ -49,18 +70,30 @@ export async function analyzeHolders(opts: {
   );
   let dataComplete = false;
   let holderListComplete = false;
+  let transferHistoryComplete = false;
+  let funderScanComplete = false;
 
   try {
     const res = await opts.explorer.getAllTokenHolders(opts.token);
     holderListComplete = res.complete;
-    const supply = opts.totalSupply ? BigInt(opts.totalSupply) : null;
+    // A bare BigInt() throws on anything the explorer did not format as an
+    // integer, and one bad row would end the holder walk mid-list while
+    // holderListComplete still said the list was whole.
+    const supply = toBigInt(opts.totalSupply);
+    let unreadableRows = 0;
 
     for (const item of res.items ?? []) {
       const address =
         typeof item.address === "string" ? item.address : item.address?.hash;
       if (!address) continue;
       const bal = item.value ?? "0";
-      const balBi = BigInt(bal);
+      const balBi = toBigInt(bal);
+      // An unparseable balance is an unknown holder, not a zero one. Dropping
+      // it silently would shorten the holder set without recording the loss.
+      if (balBi == null) {
+        unreadableRows++;
+        continue;
+      }
       const p = supply ? pct(balBi, supply) : null;
       const labels: string[] = [];
       if (opts.deployer && address.toLowerCase() === opts.deployer.toLowerCase()) {
@@ -77,6 +110,10 @@ export async function analyzeHolders(opts: {
         isContract: null,
         labels,
       });
+    }
+    if (unreadableRows > 0) {
+      holderListComplete = false;
+      errors.push(`holders: ${unreadableRows} holder row(s) had an unreadable balance`);
     }
     // Without total supply every share is null, so the category would report
     // zero findings and still call itself complete. That reads as "clean".
@@ -162,12 +199,47 @@ export async function analyzeHolders(opts: {
     });
   }
 
+  // Both scans below read only `ranked`, and neither consumes the other's
+  // output, so both reads are issued here instead of one full explorer hop
+  // after the other.
+  const transfersRead: Promise<PreloadedTransfers> = opts.transfers
+    ? Promise.resolve(opts.transfers)
+    : opts.explorer
+        .getTokenTransfers(opts.token)
+        .then((page) => ({ ok: true as const, page }))
+        .catch((e) => ({ ok: false as const, error: e instanceof Error ? e.message : String(e) }));
+
+  // The pair, its router and its factory hold supply without owning it and are
+  // already labelled known_service above, so they never reach this heuristic.
+  // The old `isContract !== true` clause read as excluding contracts but
+  // isContract is never populated, so it excluded nothing.
+  const candidates = ranked.filter((h) => !h.labels.includes("known_service")).slice(0, 5);
+  const fundersRead: Promise<
+    { ok: true; rows: (FunderRow | null)[] } | { ok: false; error: string }
+  > = Promise.all(
+    candidates.map(async (holder): Promise<FunderRow | null> => {
+      const txs = await opts.explorer.getAddressTransactions(holder.address);
+      const inbound = [...(txs.items ?? [])].reverse().find((tx) => {
+        const from = typeof tx.from === "string" ? tx.from : tx.from?.hash;
+        const to = typeof tx.to === "string" ? tx.to : tx.to?.hash;
+        return from && to?.toLowerCase() === holder.address && from.toLowerCase() !== holder.address;
+      });
+      const from = inbound ? (typeof inbound.from === "string" ? inbound.from : inbound.from?.hash) : null;
+      return from && !shouldIgnoreForOwnership(from, opts.chain)
+        ? { holder, funder: from.toLowerCase(), txHash: inbound?.hash }
+        : null;
+    })
+  )
+    .then((rows) => ({ ok: true as const, rows }))
+    .catch((e) => ({ ok: false as const, error: e instanceof Error ? e.message : String(e) }));
+
   // Cluster heuristic: first buyers in same block from transfer history
   const clusters: InsiderCluster[] = [];
-  try {
-    const transfers = await opts.explorer.getTokenTransfers(opts.token);
+  const transfersResult = await transfersRead;
+  if (transfersResult.ok) {
+    transferHistoryComplete = true;
     const byBlock = new Map<number, string[]>();
-    for (const t of transfers.items ?? []) {
+    for (const t of transfersResult.page.items ?? []) {
       const to =
         typeof t.to === "string" ? t.to : t.to?.hash;
       const bn = t.block_number;
@@ -214,28 +286,18 @@ export async function analyzeHolders(opts: {
         break; // prioritize one strongest pattern for default report
       }
     }
-  } catch (e) {
-    errors.push(`transfers: ${e instanceof Error ? e.message : String(e)}`);
+  } else {
+    errors.push(`transfers: ${transfersResult.error}`);
   }
 
   // Common-funder evidence for the largest non-service EOAs. This is stronger
   // than timing alone because every edge is backed by an explorer transaction.
-  try {
-    const candidates = ranked.filter((h) => !h.labels.includes("known_service") && h.isContract !== true).slice(0, 5);
-    const funded = await Promise.all(candidates.map(async (holder) => {
-      const txs = await opts.explorer.getAddressTransactions(holder.address);
-      const inbound = [...(txs.items ?? [])].reverse().find((tx) => {
-        const from = typeof tx.from === "string" ? tx.from : tx.from?.hash;
-        const to = typeof tx.to === "string" ? tx.to : tx.to?.hash;
-        return from && to?.toLowerCase() === holder.address && from.toLowerCase() !== holder.address;
-      });
-      const from = inbound ? (typeof inbound.from === "string" ? inbound.from : inbound.from?.hash) : null;
-      return from && !shouldIgnoreForOwnership(from, opts.chain)
-        ? { holder, funder: from.toLowerCase(), txHash: inbound?.hash }
-        : null;
-    }));
-    const groups = new Map<string, NonNullable<(typeof funded)[number]>[]>();
-    for (const row of funded.filter(Boolean) as NonNullable<(typeof funded)[number]>[]) {
+  const funderResult = await fundersRead;
+  if (funderResult.ok) {
+    funderScanComplete = true;
+    const groups = new Map<string, FunderRow[]>();
+    for (const row of funderResult.rows) {
+      if (!row) continue;
       groups.set(row.funder, [...(groups.get(row.funder) ?? []), row]);
     }
     for (const [funder, rows] of groups) {
@@ -268,8 +330,45 @@ export async function analyzeHolders(opts: {
         source: "automatic",
       });
     }
-  } catch (e) {
-    errors.push(`common funders: ${e instanceof Error ? e.message : String(e)}`);
+  } else {
+    errors.push(`common funders: ${funderResult.error}`);
+  }
+
+  // A scan that never ran leaves the insider category empty, and an empty
+  // category reads as examined and clean. Both gaps are recorded so the
+  // category is reported as incomplete rather than as no signals.
+  if (!transferHistoryComplete) {
+    findings.push({
+      id: `transfer-history-gap-${opts.token}`,
+      category: "data_gaps",
+      name: "Token transfer history could not be read",
+      severity: "medium",
+      status: "observed",
+      summary: "The explorer did not return this token's transfer list, so same-block bundle patterns were not examined.",
+      whyItMatters:
+        "An unread transfer history is unknown, not clean. Coordinated launch buys would not be visible here.",
+      evidence: [
+        { type: "contract", chain: opts.chain, value: opts.token, label: "Token whose transfer list failed to load" },
+      ],
+      source: "automatic",
+    });
+  }
+
+  if (!funderScanComplete) {
+    findings.push({
+      id: `funder-scan-gap-${opts.token}`,
+      category: "data_gaps",
+      name: "Top-holder funding history could not be read",
+      severity: "medium",
+      status: "observed",
+      summary: "Transaction lists for the largest holders did not load, so shared-funder links were not examined.",
+      whyItMatters:
+        "An unread funding history is unknown, not clean. Wallets funded from one source would not be visible here.",
+      evidence: [
+        { type: "contract", chain: opts.chain, value: opts.token, label: "Token whose holder funding scan failed" },
+      ],
+      source: "automatic",
+    });
   }
 
   if (!dataComplete) {
@@ -294,6 +393,8 @@ export async function analyzeHolders(opts: {
     holders: ranked.slice(0, 200),
     holderCount: holders.length ? holders.length : null,
     holderListComplete,
+    transferHistoryComplete,
+    funderScanComplete,
     top10Pct,
     deployerPct,
     clusters,

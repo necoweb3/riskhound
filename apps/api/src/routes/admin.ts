@@ -22,14 +22,13 @@ export async function adminRoutes(app: FastifyInstance) {
   });
 
   app.get("/admin/health", async () => {
-    const [sources, cursors, failedAnalyses, openAppeals, pendingEvents, payments] =
+    const [sources, cursors, failedAnalyses, openAppeals, pendingEvents] =
       await Promise.all([
         prisma.dataSourceHealth.findMany(),
         prisma.indexerCursor.findMany(),
         prisma.token.count({ where: { overallRisk: null } }),
         prisma.appeal.count({ where: { status: "open" } }),
         prisma.riskEvent.count({ where: { manualStatus: "pending" } }),
-        prisma.payment.groupBy({ by: ["status"], _count: true }),
       ]);
 
     return {
@@ -42,7 +41,6 @@ export async function adminRoutes(app: FastifyInstance) {
         tokensUnscored: failedAnalyses,
         openAppeals,
         pendingEvents,
-        payments,
       },
       analysisNetworks: Object.values(config.networks)
         .filter((n) => n.isAnalysisNetwork)
@@ -179,14 +177,6 @@ export async function adminRoutes(app: FastifyInstance) {
       },
     });
     return { finding: after };
-  });
-
-  app.get("/admin/payments", async () => {
-    const items = await prisma.payment.findMany({
-      orderBy: { createdAt: "desc" },
-      take: 100,
-    });
-    return { items };
   });
 
   app.get("/admin/audit", async () => {

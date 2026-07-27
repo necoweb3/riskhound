@@ -11,6 +11,7 @@ function explorerWith(items: { address: string; value: string }[], complete = tr
     getAllTokenHolders: async () => ({ items, complete }),
     getTokenHolders: async () => ({ items, next_page_params: null }),
     getTokenTransfers: async () => ({ items: [] }),
+    getAddressTransactions: async () => ({ items: [] }),
   } as unknown as BlockscoutClient;
 }
 
@@ -117,5 +118,70 @@ describe("analyzeHolders", () => {
     // Zero would read as "the deployer holds nothing", which is a claim we
     // cannot make from a single page of holders.
     expect(res.deployerPct).toBeNull();
+  });
+
+  it("reports the insider scans as incomplete when their reads failed", async () => {
+    const explorer = {
+      getAllTokenHolders: async () => ({
+        items: [{ address: "0x1111111111111111111111111111111111111111", value: "1000" }],
+        complete: true,
+      }),
+      getTokenTransfers: async () => {
+        throw new Error("HTTP 500");
+      },
+      getAddressTransactions: async () => {
+        throw new Error("HTTP 500");
+      },
+    } as unknown as BlockscoutClient;
+
+    const res = await analyzeHolders({
+      chain: "arc_testnet",
+      token: "0xtoken",
+      explorer,
+      totalSupply: SUPPLY,
+    });
+
+    // The holder list answered, so it stays complete; the two insider scans
+    // did not, and silence there must not read as "no insider links".
+    expect(res.holderListComplete).toBe(true);
+    expect(res.transferHistoryComplete).toBe(false);
+    expect(res.funderScanComplete).toBe(false);
+    expect(res.findings.some((f) => f.name === "Token transfer history could not be read")).toBe(true);
+    expect(res.findings.some((f) => f.name === "Top-holder funding history could not be read")).toBe(true);
+  });
+
+  it("does not lose the whole holder set to one unparseable balance", async () => {
+    const res = await analyzeHolders({
+      chain: "arc_testnet",
+      token: "0xtoken",
+      explorer: explorerWith([
+        { address: "0x1111111111111111111111111111111111111111", value: "600" },
+        { address: "0x2222222222222222222222222222222222222222", value: "1.0e+2" },
+        { address: "0x3333333333333333333333333333333333333333", value: "300" },
+      ]),
+      totalSupply: SUPPLY,
+    });
+
+    // The readable rows survive, and the dropped one is reported rather than
+    // leaving a shortened list described as whole.
+    expect(res.holders).toHaveLength(2);
+    expect(res.holderListComplete).toBe(false);
+    expect(res.dataComplete).toBe(false);
+  });
+
+  it("keeps the holder set when total supply is not an integer string", async () => {
+    const res = await analyzeHolders({
+      chain: "arc_testnet",
+      token: "0xtoken",
+      explorer: explorerWith([
+        { address: "0x1111111111111111111111111111111111111111", value: "1000" },
+      ]),
+      totalSupply: "1.0000000000000002e+21",
+    });
+
+    // A bare BigInt() threw here and discarded every holder that had already
+    // been read.
+    expect(res.holders).toHaveLength(1);
+    expect(res.dataComplete).toBe(false);
   });
 });

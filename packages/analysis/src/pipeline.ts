@@ -45,27 +45,64 @@ export async function analyzeToken(opts: AnalyzeTokenOptions): Promise<AnalyzeTo
   const dataSources: DataSourceStatus[] = [];
   const timeline: TimelineEvent[] = [];
 
+  // Nothing in this group consumes anything else in it: the two health probes
+  // read no token data, analyzeContract and analyzeApexiSwap read different
+  // sources, and the token transfer page is shared by the holder and liquidity
+  // analyzers below. Awaited one at a time these were the whole prologue of
+  // every analysis, ahead of any other analyzer.
+  const [blockProbe, rpcProbe, contract, dexRead, transfersRead] = await Promise.all([
+    arc.explorer
+      .getLatestBlock()
+      .then((block) => ({ ok: true as const, block }))
+      .catch((e) => ({ ok: false as const, error: e instanceof Error ? e.message : String(e) })),
+    arc.rpc
+      ? arc.rpc
+          .getBlockNumber()
+          .then(() => ({ ok: true as const }))
+          .catch((e) => ({ ok: false as const, error: e instanceof Error ? e.message : String(e) }))
+      : Promise.resolve(null),
+    analyzeContract({
+      chain: "arc_testnet",
+      address: addr,
+      rpc: arc.rpc,
+      explorer: arc.explorer,
+      explorerUrl: arc.network.explorerUrl,
+    }),
+    // One failing pair read must not discard a report where every other
+    // analyzer answered. The DEX result becomes a recorded gap instead.
+    analyzeApexiSwap({
+      chain: "arc_testnet",
+      token: addr,
+      rpc: arc.rpc,
+      explorer: arc.explorer,
+      // The flag used to be applied after the round trip had already run, so
+      // the callers that ask for a cheap graph paid for it in full.
+      skipSimulation: opts.skipSimulation,
+    })
+      .then((value) => ({ ok: true as const, value }))
+      .catch((e) => ({ ok: false as const, error: e instanceof Error ? e.message : String(e) })),
+    arc.explorer
+      .getTokenTransfers(addr)
+      .then((page) => ({ ok: true as const, page }))
+      .catch((e) => ({ ok: false as const, error: e instanceof Error ? e.message : String(e) })),
+  ]);
+
   // Health probes
-  let lastBlock: number | null = null;
-  try {
-    const b = await arc.explorer.getLatestBlock();
-    lastBlock = b?.number ?? null;
-    dataSources.push({
-      key: "arc_explorer",
-      name: "Arc Blockscout",
-      healthy: lastBlock != null,
-      lastSuccessAt: new Date().toISOString(),
-      usedInThisAnalysis: true,
-      lagBlocks: 0,
-    });
-  } catch (e) {
-    dataSources.push({
-      key: "arc_explorer",
-      name: "Arc Blockscout",
-      healthy: false,
-      lastError: e instanceof Error ? e.message : String(e),
-      usedInThisAnalysis: true,
-    });
+  const lastBlock = blockProbe.ok ? blockProbe.block?.number ?? null : null;
+  dataSources.push({
+    key: "arc_explorer",
+    name: "Arc Blockscout",
+    healthy: lastBlock != null,
+    // A read that did not answer must not be stamped with a fresh success
+    // time; the agent API publishes this field as data freshness.
+    ...(lastBlock != null ? { lastSuccessAt: new Date().toISOString() } : {}),
+    ...(blockProbe.ok ? {} : { lastError: blockProbe.error }),
+    usedInThisAnalysis: true,
+    lagBlocks: 0,
+  });
+  if (lastBlock == null) {
+    // getLatestBlock reports an outage by returning null rather than throwing,
+    // so the old catch never ran and no explorer problem reached `errors`.
     errors.push("Arc explorer unhealthy");
   }
 
@@ -80,35 +117,25 @@ export async function analyzeToken(opts: AnalyzeTokenOptions): Promise<AnalyzeTo
       usedInThisAnalysis: false,
       lastError: "RPC not configured",
     });
+  } else if (rpcProbe?.ok) {
+    dataSources.push({
+      key: "arc_rpc",
+      name: "Arc RPC",
+      healthy: true,
+      lastSuccessAt: new Date().toISOString(),
+      usedInThisAnalysis: true,
+    });
   } else {
-    try {
-      await arc.rpc.getBlockNumber();
-      dataSources.push({
-        key: "arc_rpc",
-        name: "Arc RPC",
-        healthy: true,
-        lastSuccessAt: new Date().toISOString(),
-        usedInThisAnalysis: true,
-      });
-    } catch (e) {
-      dataSources.push({
-        key: "arc_rpc",
-        name: "Arc RPC",
-        healthy: false,
-        lastError: e instanceof Error ? e.message : String(e),
-        usedInThisAnalysis: true,
-      });
-      errors.push("Arc RPC unhealthy");
-    }
+    dataSources.push({
+      key: "arc_rpc",
+      name: "Arc RPC",
+      healthy: false,
+      lastError: rpcProbe && !rpcProbe.ok ? rpcProbe.error : "RPC probe did not complete",
+      usedInThisAnalysis: true,
+    });
+    errors.push("Arc RPC unhealthy");
   }
 
-  const contract = await analyzeContract({
-    chain: "arc_testnet",
-    address: addr,
-    rpc: arc.rpc,
-    explorer: arc.explorer,
-    explorerUrl: arc.network.explorerUrl,
-  });
   errors.push(...contract.errors);
   allFindings.push(...contract.findings);
 
@@ -126,19 +153,11 @@ export async function analyzeToken(opts: AnalyzeTokenOptions): Promise<AnalyzeTo
     });
   }
 
-  // One failing pair read must not discard a report where every other analyzer
-  // answered. The DEX result becomes a recorded gap instead.
   let dex: Awaited<ReturnType<typeof analyzeApexiSwap>> | null = null;
-  try {
-    dex = await analyzeApexiSwap({
-      chain: "arc_testnet",
-      token: addr,
-      tokenDecimals: contract.decimals,
-      rpc: arc.rpc,
-      explorer: arc.explorer,
-    });
-  } catch (e) {
-    errors.push(`dex: ${e instanceof Error ? e.message : String(e)}`);
+  if (dexRead.ok) {
+    dex = dexRead.value;
+  } else {
+    errors.push(`dex: ${dexRead.error}`);
     allFindings.push({
       id: `dex-unavailable-${addr}`,
       category: "data_gaps",
@@ -155,26 +174,50 @@ export async function analyzeToken(opts: AnalyzeTokenOptions): Promise<AnalyzeTo
   }
   const simulation = opts.skipSimulation ? null : dex?.simulation ?? null;
 
-  const holders = await analyzeHolders({
-    chain: "arc_testnet",
-    token: addr,
-    explorer: arc.explorer,
-    deployer: contract.deployer,
-    totalSupply: contract.totalSupply,
-    // The pair holds the float by construction. Counting it made a token with
-    // healthy exit liquidity read as highly concentrated, and named the pool
-    // itself as the suspicious holder.
-    poolAddresses: [dex?.pair?.address, APEXISWAP.router, APEXISWAP.factory],
-  });
+  // These three read only fields analyzeContract already produced, and nothing
+  // any of them produces. allSettled rather than all so a rejection in one
+  // cannot leave a sibling's rejection unhandled; a throwing analyzer still
+  // ends the analysis exactly as it did when they ran one after another.
+  const [holdersRead, liquidityRead, deployerRead] = await Promise.allSettled([
+    analyzeHolders({
+      chain: "arc_testnet",
+      token: addr,
+      explorer: arc.explorer,
+      deployer: contract.deployer,
+      totalSupply: contract.totalSupply,
+      // The pair holds the float by construction. Counting it made a token with
+      // healthy exit liquidity read as highly concentrated, and named the pool
+      // itself as the suspicious holder.
+      poolAddresses: [dex?.pair?.address, APEXISWAP.router, APEXISWAP.factory],
+      transfers: transfersRead,
+    }),
+    analyzeLiquidity({
+      chain: "arc_testnet",
+      token: addr,
+      explorer: arc.explorer,
+      deployer: contract.deployer,
+      // Both of these were fetched again here for data this analysis already
+      // had in memory.
+      exchangeRate: contract.exchangeRate,
+      transfers: transfersRead,
+    }),
+    contract.deployer
+      ? buildDeployerProfile({
+          chain: "arc_testnet",
+          address: contract.deployer,
+          explorer: arc.explorer,
+          currentToken: addr,
+        })
+      : Promise.resolve(null),
+  ]);
+
+  const holders = unwrapSettled(holdersRead);
+  const liquidity = unwrapSettled(liquidityRead);
+  let deployerProfile = unwrapSettled(deployerRead);
+
   allFindings.push(...holders.findings);
   errors.push(...holders.errors);
 
-  const liquidity = await analyzeLiquidity({
-    chain: "arc_testnet",
-    token: addr,
-    explorer: arc.explorer,
-    deployer: contract.deployer,
-  });
   if (dex?.pair) {
     liquidity.snapshot.pools = [dex.pair];
     liquidity.snapshot.dominantController = dex.lpController;
@@ -206,17 +249,30 @@ export async function analyzeToken(opts: AnalyzeTokenOptions): Promise<AnalyzeTo
   errors.push(...liquidity.errors);
   timeline.push(...liquidity.snapshot.recentAdds, ...liquidity.snapshot.recentRemoves);
 
-  let deployerProfile = null;
-  if (contract.deployer) {
-    deployerProfile = await buildDeployerProfile({
-      chain: "arc_testnet",
-      address: contract.deployer,
-      explorer: arc.explorer,
-      currentToken: addr,
+  // An explorer that answers for the token but holds no creator record leaves
+  // both the deployer and the cross-chain analyzer unrun. Neither pushes an
+  // error, so without this the two categories are silently empty, and an empty
+  // category reads as examined and clean.
+  if (!contract.deployer) {
+    allFindings.push({
+      id: `deployer-unknown-${addr}`,
+      category: "data_gaps",
+      name: "Contract creator could not be identified",
+      severity: "medium",
+      status: "observed",
+      summary:
+        "No creator address was returned for this contract, so deployer history and cross-chain history were not examined.",
+      whyItMatters:
+        "An unidentified deployer is unknown, not clean. Neither the wallet's history nor its activity on other networks could be checked.",
+      evidence: [
+        { type: "contract", chain: "arc_testnet", value: addr, label: "Contract with no known creator" },
+      ],
+      source: "automatic",
     });
   }
 
   let crossLinks = [] as Awaited<ReturnType<typeof compareCrossChain>>["links"];
+  let crossChainComplete = false;
   if (!opts.skipCrossChain && contract.deployer) {
     try {
       const rh = getRobinhoodClients();
@@ -255,6 +311,9 @@ export async function analyzeToken(opts: AnalyzeTokenOptions): Promise<AnalyzeTo
       crossLinks = xc.links;
       allFindings.push(...xc.findings);
       errors.push(...xc.errors);
+      // An address whose outside-chain lookup failed was not examined, so the
+      // category only counts as complete when every lookup answered.
+      crossChainComplete = xc.errors.length === 0;
       if (deployerProfile) {
         deployerProfile = { ...deployerProfile, crossChain: xc.links };
       }
@@ -287,13 +346,29 @@ export async function analyzeToken(opts: AnalyzeTokenOptions): Promise<AnalyzeTo
     deployerHistoryLabel: deployerProfile?.historyLabel,
     deployerAddress: contract.deployer,
     // Completeness reported by the analyzers themselves, so a category is only
-    // called complete when the reads behind it actually answered.
+    // called complete when the reads behind it actually answered. A category
+    // left out here defaults to complete, which publishes a dimension that was
+    // never examined as examined and clean.
     analyzerCompleteness: {
-      contract: contract.errors.length === 0 && !contract.sourceUnavailable,
+      // "Not verified" is something the explorer told us, and it is already
+      // carried as a contract finding. Reading it as a gap pinned every
+      // unverified token below high confidence for a read that never failed.
+      contract: contract.errors.length === 0 && contract.codeRead,
+      // Both producers of this category need the bytecode: the selector scan
+      // reads it directly, and a node that refuses eth_getCode refuses the
+      // owner() read too.
+      owner_admin: contract.codeRead,
       buy_sell: simulation?.dataComplete ?? false,
       liquidity: dex?.lpDataComplete ?? false,
       holder_concentration: holders.dataComplete,
-      insider_links: holders.holderListComplete,
+      insider_links:
+        holders.holderListComplete &&
+        holders.transferHistoryComplete &&
+        holders.funderScanComplete,
+      // A wallet history that was truncated or never read establishes nothing
+      // about the deployer in either direction.
+      deployer_history: deployerProfile != null && deployerProfile.historyLabel !== "unknown",
+      cross_chain: crossChainComplete,
     },
   });
 
@@ -328,7 +403,10 @@ export async function analyzeToken(opts: AnalyzeTokenOptions): Promise<AnalyzeTo
     bytecodeHash: contract.bytecodeHash,
     firstLiquidityUsd: null,
     liquidityUsd: liquidity.snapshot.totalUsd,
-    holderCount: holders.holderCount,
+    // A capped page walk is a floor, not the holder count. Stored, it
+    // overwrote the explorer's true count from discovery and ranked a large
+    // token below a small one on the holders leaderboard.
+    holderCount: holders.holderListComplete ? holders.holderCount : null,
     isActive: holders.holders.length > 0 || (simulation?.canBuy ?? null),
     overallRisk: report.overall,
     confidence: report.confidence,
@@ -358,6 +436,16 @@ export async function analyzeToken(opts: AnalyzeTokenOptions): Promise<AnalyzeTo
   };
 
   return { detail, report, graph, errors };
+}
+
+/**
+ * Analyzers that used to be awaited in sequence now run together, so their
+ * rejections have to be collected rather than raced. Rethrowing here keeps the
+ * old behaviour: the first failing analyzer still ends the analysis.
+ */
+function unwrapSettled<T>(result: PromiseSettledResult<T>): T {
+  if (result.status === "rejected") throw result.reason;
+  return result.value;
 }
 
 /**

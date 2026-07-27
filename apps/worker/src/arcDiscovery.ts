@@ -3,6 +3,9 @@ import { discoverRecentApexiPairs } from "@rugkiller/analysis";
 import { prisma } from "@rugkiller/db";
 import type { Address, Hex } from "viem";
 
+/** Blocks read together. They are still processed, and committed, in order. */
+const BLOCK_FETCH_BATCH = 12;
+
 /**
  * Discover new ERC-20-like tokens on Arc.
  * Skips bare contract deploys that are not tokens (avoids "Unknown token" spam).
@@ -51,6 +54,18 @@ export async function runArcDiscovery(): Promise<string[]> {
       },
     });
     throw e;
+  }
+
+  // Both scans below run entirely against the node, so an explorer outage must
+  // not disable discovery on an RPC that is still answering. The arc_explorer
+  // health row above stays the separate signal that the explorer is down.
+  if (latest == null && arc.rpc) {
+    try {
+      const head = Number(await arc.rpc.getBlockNumber());
+      if (Number.isFinite(head) && head > 0) latest = head;
+    } catch (e) {
+      console.warn("[arc-discovery] rpc head", e instanceof Error ? e.message : e);
+    }
   }
 
   const cursor = await prisma.indexerCursor.upsert({
@@ -151,31 +166,41 @@ export async function runArcDiscovery(): Promise<string[]> {
           data: newRows.map((item) => ({ ...item, chain: "arc_testnet", standard: "ERC-20" })),
         });
       }
+      const refreshes: Promise<unknown>[] = [];
       for (const item of candidates) {
         const existing = existingByAddress.get(item.address);
         if (found.length < 50 && (!existing || !existing.analysisUpdatedAt)) found.push(item.address);
-        if (existing && ((!existing.name && item.name) || (!existing.symbol && item.symbol))) {
-          await prisma.token.update({
-            where: { id: existing.id },
-            data: {
-              name: existing.name ?? item.name,
-              symbol: existing.symbol ?? item.symbol,
-              decimals: existing.decimals ?? item.decimals,
-              totalSupply: existing.totalSupply ?? item.totalSupply,
-              standard: "ERC-20",
-              holderCount: item.holderCount ?? existing.holderCount,
-            },
-          });
+        if (!existing) continue;
+        // Identity is backfilled only when missing, so a correction is not
+        // overwritten. Holder count and supply are live figures: gating them on
+        // a missing name froze both at whatever the first sighting reported,
+        // and holderCount is displayed and is the backfill's ranking key.
+        const patch: Record<string, unknown> = {};
+        if (!existing.name && item.name) patch.name = item.name;
+        if (!existing.symbol && item.symbol) patch.symbol = item.symbol;
+        if (existing.decimals == null && item.decimals != null) patch.decimals = item.decimals;
+        if (existing.standard !== "ERC-20") patch.standard = "ERC-20";
+        if (item.totalSupply != null && item.totalSupply !== existing.totalSupply) {
+          patch.totalSupply = item.totalSupply;
+        }
+        if (item.holderCount != null && item.holderCount !== existing.holderCount) {
+          patch.holderCount = item.holderCount;
+        }
+        // A row the explorer agrees with must not become a write.
+        if (Object.keys(patch).length) {
+          refreshes.push(prisma.token.update({ where: { id: existing.id }, data: patch }));
         }
       }
+      if (refreshes.length) await Promise.all(refreshes);
       inventoryIndexed += candidates.length;
       inventoryCursor = tokens.next_page_params ?? null;
       inventoryPages++;
     } while (runFullInventory && inventoryCursor && inventoryPages < 100);
 
-    // getTokens() converts explorer HTTP failures into an empty page, so a run
-    // that saw no rows at all cannot be told apart from an outage. Record that
-    // as a gap instead of a healthy inventory containing zero tokens.
+    // getTokens() throws on an HTTP failure and the catch below records the real
+    // error, so this check is not standing in for a swallowed one: it only
+    // separates a genuinely empty explorer response from a populated one, which
+    // is still a gap rather than an inventory that contains zero tokens.
     const inventoryOk = inventoryRows > 0;
     const inventoryError = inventoryOk
       ? null
@@ -226,25 +251,47 @@ export async function runArcDiscovery(): Promise<string[]> {
     // The cursor may only advance over blocks that were scanned end to end.
     // Committing `end` after a break or an RPC error skipped those blocks for good.
     let lastScanned = from - 1;
+    const rpcClient = arc.rpc;
+    let stopped = false;
 
-    for (let bn = from; bn <= end; bn++) {
-      let blockComplete = true;
-      try {
-        const block = await arc.rpc.getBlock({
-          blockNumber: BigInt(bn),
-          includeTransactions: true,
-        });
+    for (let batchStart = from; batchStart <= end && !stopped; batchStart += BLOCK_FETCH_BATCH) {
+      const batchEnd = Math.min(end, batchStart + BLOCK_FETCH_BATCH - 1);
+      const numbers: number[] = [];
+      for (let bn = batchStart; bn <= batchEnd; bn++) numbers.push(bn);
+      // Block reads are independent, so issuing them together changes only the
+      // wall clock. They are still walked in order below and the cursor still
+      // advances over a contiguous prefix, which a break must not violate.
+      const fetched = await Promise.all(
+        numbers.map(async (bn) => {
+          try {
+            return {
+              bn,
+              block: await rpcClient.getBlock({ blockNumber: BigInt(bn), includeTransactions: true }),
+            };
+          } catch (e) {
+            console.warn(`[arc-discovery] block ${bn}`, e instanceof Error ? e.message : e);
+            return { bn, block: null };
+          }
+        })
+      );
 
-        for (const tx of block?.transactions ?? []) {
+      for (const { bn, block } of fetched) {
+        if (!block) {
+          stopped = true;
+          break;
+        }
+        let blockComplete = true;
+
+        for (const tx of block.transactions ?? []) {
           if (typeof tx === "string") continue;
           if (tx.to != null || !tx.hash) continue;
 
           try {
-            const receipt = await arc.rpc.getTransactionReceipt({ hash: tx.hash });
+            const receipt = await rpcClient.getTransactionReceipt({ hash: tx.hash });
             const created = receipt?.contractAddress?.toLowerCase();
             if (!created) continue;
 
-            const code = await getCode(arc.rpc, created as Address);
+            const code = await getCode(rpcClient, created as Address);
             if (!code || code === "0x" || code.length < 20) continue;
 
             // Must look like ERC-20 (transfer + balanceOf or totalSupply selectors)
@@ -308,12 +355,13 @@ export async function runArcDiscovery(): Promise<string[]> {
             blockComplete = false;
           }
         }
-      } catch (e) {
-        console.warn(`[arc-discovery] block ${bn}`, e instanceof Error ? e.message : e);
-        blockComplete = false;
+
+        if (!blockComplete) {
+          stopped = true;
+          break;
+        }
+        lastScanned = bn;
       }
-      if (!blockComplete) break;
-      lastScanned = bn;
     }
 
     if (lastScanned >= from) {

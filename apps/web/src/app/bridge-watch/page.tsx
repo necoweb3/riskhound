@@ -12,7 +12,8 @@ type BridgeWatch = {
   transfers: Array<{ sourceChain: string; sourceTxHash: string; sender: string; recipient: string; amountUsdc: number; observedAt: string; status: "waiting_for_circle" | "attestation_ready" | "status_unavailable"; statusDetail: string; sourceExplorerUrl: string; recipientArcExplorerUrl: string | null; priority: "standard" | "high_value" }>;
   trackedWallets: Array<{ address: string; committedUsdc: number; lastSeenAt: string; arcExplorerUrl: string | null; positions: Position[]; activity: Activity[] }>;
   supplyIntelligence: { recentDirectMints: Array<{ txHash: string; observedAt: string | null; minter: string | null; recipient: string; amountUsdc: number; classification: string; explorerUrl: string | null }>; recentDirectMintUsdc: number; mintSource?: "explorer" | "rpc" | "unavailable"; mintWindowBlocks?: number | null; classificationNote: string };
-  reconciliation: { anomalies: Array<{ sourceTxHash: string; arcTxHash: string; amountUsdc: number; circleStatus: string; arcConfirmed: boolean; classification: string; detail: string; sourceExplorerUrl: string; arcExplorerUrl: string }> };
+  /** arcExplorerUrl is null when chain 5042 has no explorer to link the settlement to. */
+  reconciliation: { anomalies: Array<{ sourceTxHash: string; arcTxHash: string; amountUsdc: number; circleStatus: string; arcConfirmed: boolean; classification: string; detail: string; sourceExplorerUrl: string; arcExplorerUrl: string | null }> };
   liquidityPressure: { tokenCount: number; usdcSupply: number | null; usdcPerIndexedToken: number | null; measuredDexLiquidityUsd: number | null; tokensWithMeasuredLiquidity: number; coverageComplete: boolean; note: string };
   systemMintRecipients: Array<{ address: string; mintedUsdc: number; lastMintAt: string; disclosure: string; arcExplorerUrl: string | null; positions: Position[]; activity: Activity[] }>;
   /** Null when chain 5042 has no explorer, which is what gates the Arc-side figures. */
@@ -108,7 +109,7 @@ export default async function BridgeWatchPage() {
         {data.reconciliation.anomalies.map((item) => <article className="rk-reconciliation" key={item.sourceTxHash}>
           <div><strong>{amount(item.amountUsdc, 2)} USDC</strong><p className="rk-faint rk-zero">{item.detail}</p></div>
           <div className="rk-reconciliation__states"><span>Circle <strong>{item.circleStatus.replaceAll("_", " ")}</strong></span><span>Arc <strong>{item.arcConfirmed ? "confirmed" : "unresolved"}</strong></span></div>
-          <div className="rk-bridge-row__actions"><a className="rk-btn rk-btn--sm" href={item.sourceExplorerUrl} target="_blank" rel="noreferrer">Source burn</a><a className="rk-btn rk-btn--sm" href={item.arcExplorerUrl} target="_blank" rel="noreferrer">Arc settlement</a></div>
+          <div className="rk-bridge-row__actions"><a className="rk-btn rk-btn--sm" href={item.sourceExplorerUrl} target="_blank" rel="noreferrer">Source burn</a>{item.arcExplorerUrl ? <a className="rk-btn rk-btn--sm" href={item.arcExplorerUrl} target="_blank" rel="noreferrer">Arc settlement</a> : <span className="rk-faint">No Arc explorer</span>}</div>
         </article>)}
       </section>
 

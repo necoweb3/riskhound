@@ -10,7 +10,7 @@ import {
   scanSelectors,
 } from "@rugkiller/chain";
 import { OBSERVED_ARC_CHAIN, observedArcExplorer } from "@rugkiller/shared";
-import { prisma } from "@rugkiller/db";
+import { prisma, jparse } from "@rugkiller/db";
 
 
 type ExplorerToken = {
@@ -76,14 +76,10 @@ function assessObservedRisk(opts: {
 }
 
 /**
- * Read what the node alone can prove about a contract on chain 5042. This is
- * everything the explorer used to supply except the parts that need an index:
- * holder lists, the creator address and source verification.
- */
-/**
- * A request must answer even when the node does not. viem's per-call timeout
- * is not a budget for the whole read, so several slow calls could still add up
- * past the proxy's limit and the request would die with no response at all.
+ * A request must answer even when the node does not. Every call in the read
+ * below carries its own deadline, so this is a backstop for anything added
+ * outside them; it stays above the per-call budget so a slow call reports its
+ * own failure instead of losing the calls that did answer.
  */
 const RPC_READ_BUDGET_MS = Number(process.env.OBSERVED_ARC_READ_BUDGET_MS ?? 20_000);
 /** Each call gets its own deadline so one slow one cannot eat the whole budget. */
@@ -96,6 +92,11 @@ function withBudget<T>(work: Promise<T>, fallback: T, ms = RPC_READ_BUDGET_MS): 
   ]);
 }
 
+/**
+ * Read what the node alone can prove about a contract on chain 5042. This is
+ * everything the explorer used to supply except the parts that need an index:
+ * holder lists, the creator address and source verification.
+ */
 async function readContractOverRpcUnbounded(address: `0x${string}`) {
   const empty = {
     reachable: false,
@@ -151,7 +152,9 @@ async function readContractOverRpcUnbounded(address: `0x${string}`) {
 
   const code = probe.code;
   if (!code) {
-    return { ...empty, reachable: true, hasCode: false, blockNumber };
+    // Reporting no bytecode says nothing about the calls that did not answer,
+    // and a response claiming a clean read is undebuggable, so they travel too.
+    return { ...empty, reachable: true, hasCode: false, blockNumber, error: failures || null };
   }
 
   const proxy = detectProxyHints(code);
@@ -228,25 +231,35 @@ function readContractOverRpc(address: `0x${string}`) {
   );
 }
 
-function encodeCursor(value: unknown) {
-  return Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
-}
+/**
+ * One page view is eight JSON-RPC calls against a keyless public endpoint, and
+ * a refresh repeated them all. A read that answered is reused briefly so a
+ * crawler cannot throttle the node into reporting a contract as unreadable.
+ */
+const RPC_READ_TTL_MS = Number(process.env.OBSERVED_ARC_READ_TTL_MS ?? 45_000);
+const RPC_READ_CACHE_MAX = 500;
+const rpcReadCache = new Map<string, { at: number; value: RpcRead }>();
 
-function decodeCursor(value?: string) {
-  if (!value) return null;
-  try {
-    return JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as Record<string, unknown>;
-  } catch {
-    return null;
+async function readContractOverRpcCached(address: `0x${string}`): Promise<RpcRead> {
+  const key = address.toLowerCase();
+  const hit = rpcReadCache.get(key);
+  if (hit && Date.now() - hit.at < RPC_READ_TTL_MS) return hit.value;
+  const value = await readContractOverRpc(address);
+  // A read the node never answered is not cached: pinning an outage in front of
+  // the next request would report a readable contract as unreadable for the
+  // whole TTL. A read that reached the node is cached even when one of its
+  // calls timed out, because the reason travels back in error and is reported
+  // as a gap; the alternative is letting a throttled node be re-hammered by
+  // every request.
+  if (value.reachable) {
+    if (rpcReadCache.size >= RPC_READ_CACHE_MAX) {
+      // Map iterates in insertion order, so this drops the oldest entry.
+      const oldest = rpcReadCache.keys().next().value;
+      if (oldest) rpcReadCache.delete(oldest);
+    }
+    rpcReadCache.set(key, { at: Date.now(), value });
   }
-}
-
-function queryString(values: Record<string, unknown> | null) {
-  const query = new URLSearchParams({ type: "ERC-20" });
-  for (const [key, value] of Object.entries(values ?? {})) {
-    query.set(key, value == null ? "null" : String(value));
-  }
-  return query.toString();
+  return value;
 }
 
 function decodeExplorerText(value?: string | null) {
@@ -271,17 +284,32 @@ function tokenView(token: ExplorerToken) {
   };
 }
 
-function listAssessment(token: ExplorerToken) {
-  const signals: Array<{ severity: "medium"; name: string; detail: string }> = [];
-  if (!decodeExplorerText(token.name) && !decodeExplorerText(token.symbol)) {
-    signals.push({ severity: "medium", name: "Token metadata incomplete", detail: "Name and symbol are unavailable from the observed explorer." });
+/**
+ * Concentration read from the stored holder index. The thresholds are the ones
+ * assessObservedRisk applies to explorer holders, so the two paths agree.
+ */
+export function concentrationSignals(holders: Array<{ pct: number | null }>) {
+  const shares = holders
+    .map((holder) => holder.pct)
+    .filter((pct): pct is number => pct != null)
+    .sort((a, b) => b - a);
+  if (!shares.length) return [];
+  const top1 = shares[0];
+  const top5 = shares.slice(0, 5).reduce((sum, value) => sum + value, 0);
+  const signals: Array<{ severity: "low" | "medium" | "high" | "critical"; name: string; detail: string }> = [];
+  if (top1 >= 50) {
+    signals.push({ severity: "critical", name: "Single-holder concentration", detail: `Largest indexed holder controls about ${top1.toFixed(1)}% of supply.` });
+  } else if (top1 >= 20) {
+    signals.push({ severity: "high", name: "Large single holder", detail: `Largest indexed holder controls about ${top1.toFixed(1)}% of supply.` });
   }
-  if (token.holders_count == null) {
-    signals.push({ severity: "medium", name: "Holder list incomplete", detail: "Holder coverage must be checked on the token detail page." });
+  if (top5 >= 80) {
+    signals.push({ severity: "high", name: "Top-five concentration", detail: `Top five indexed holders control about ${top5.toFixed(1)}% of supply.` });
   }
-  signals.push({ severity: "medium", name: "Verification checked in details", detail: "Open the token to load verification and concentration evidence." });
-  return { level: "caution", confidence: "low", signals };
+  return signals;
 }
+
+/** Search resolves matching ids with a portable LIKE, so the id set is capped. */
+const SEARCH_MATCH_LIMIT = 500;
 
 export async function observedMainnetRoutes(app: FastifyInstance) {
   app.get("/observed-mainnet/tokens", async (request, reply) => {
@@ -292,22 +320,45 @@ export async function observedMainnetRoutes(app: FastifyInstance) {
       q: z.string().max(120).optional(),
       includeTests: z.enum(["true", "false"]).optional().default("false").transform((value) => value === "true"),
     }).parse(request.query);
-    const needle = query.q?.trim();
-    const where = {
+    const needle = query.q?.trim().toLowerCase();
+    let searchTruncated = false;
+    let matchedIds: string[] | null = null;
+    if (needle) {
+      // Prisma's contains is case sensitive on Postgres and case insensitive on
+      // SQLite, and mode: "insensitive" does not exist on the SQLite client, so
+      // matching runs against a lowercased form in SQL to behave the same way
+      // on both. The cap needs an order, or paging a truncated search would
+      // drop and repeat rows between requests.
+      const pattern = `%${needle.replace(/[\\%_]/g, (char) => `\\${char}`)}%`;
+      const matches = await prisma.$queryRaw<{ id: string }[]>`
+        SELECT "id" FROM "Token"
+        WHERE "chain" = ${OBSERVED_ARC_CHAIN}
+          AND (lower("address") LIKE ${pattern} ESCAPE '\\'
+            OR lower("name") LIKE ${pattern} ESCAPE '\\'
+            OR lower("symbol") LIKE ${pattern} ESCAPE '\\')
+        ORDER BY "createdAt" DESC, "address" ASC
+        LIMIT ${SEARCH_MATCH_LIMIT + 1}
+      `;
+      searchTruncated = matches.length > SEARCH_MATCH_LIMIT;
+      matchedIds = matches.slice(0, SEARCH_MATCH_LIMIT).map((row) => row.id);
+    }
+    const where: Record<string, unknown> = {
       chain: OBSERVED_ARC_CHAIN,
       ...(query.sort === "critical" ? { overallRisk: "critical_risk" } : {}),
       ...(query.sort === "high_risk" ? { overallRisk: { in: ["critical_risk", "high_risk"] } } : {}),
+      // NULL LIKE 'qa_%' is NULL, so a plain NOT dropped every token with no
+      // name or symbol from both the page and the count. An unnamed contract is
+      // exactly what this feed must not hide. The underscore stays unescaped:
+      // startsWith is a bound parameter with no ESCAPE clause, so a backslash
+      // is literal on SQLite and an escape on Postgres, and the filter would
+      // stop excluding anything on the dev datasource.
       ...(!query.includeTests ? {
         AND: [
-          { NOT: { name: { startsWith: "qa_" } } },
-          { NOT: { symbol: { startsWith: "qa_" } } },
+          { OR: [{ name: null }, { NOT: { name: { startsWith: "qa_" } } }] },
+          { OR: [{ symbol: null }, { NOT: { symbol: { startsWith: "qa_" } } }] },
         ],
       } : {}),
-      ...(needle ? { OR: [
-        { address: { contains: needle.toLowerCase() } },
-        { name: { contains: needle } },
-        { symbol: { contains: needle } },
-      ] } : {}),
+      ...(matchedIds ? { id: { in: matchedIds } } : {}),
     };
     const orderBy = query.sort === "holders"
       ? [{ holderCount: "desc" as const }, { createdAt: "desc" as const }]
@@ -340,6 +391,9 @@ export async function observedMainnetRoutes(app: FastifyInstance) {
         },
       })),
       total,
+      // A capped search means total counts the matches we could resolve, not
+      // every token that matches the term.
+      searchTruncated,
       page: query.page,
       pageSize: query.limit,
       totalPages: Math.max(1, Math.ceil(total / query.limit)),
@@ -360,6 +414,9 @@ export async function observedMainnetRoutes(app: FastifyInstance) {
 
     const cached = await prisma.token.findUnique({
       where: { chain_address: { chain: OBSERVED_ARC_CHAIN, address: stored } },
+      // The holder index reconstructs these from the node, so the detail page
+      // has real distribution evidence even with no explorer.
+      include: { holders: { orderBy: { pct: "desc" }, take: 50 } },
     });
 
     const explorer = observedArcExplorer();
@@ -377,7 +434,7 @@ export async function observedMainnetRoutes(app: FastifyInstance) {
     // Chain 5042 is still reachable over RPC, so contract facts are read live
     // and only the index-dependent parts are reported as gaps.
     if (!tokenResponse?.ok) {
-      const live = await readContractOverRpc(normalized);
+      const live = await readContractOverRpcCached(normalized);
 
       if (!live.reachable && !cached) {
         return reply.code(503).send({
@@ -395,13 +452,47 @@ export async function observedMainnetRoutes(app: FastifyInstance) {
         });
       }
 
+      const storedHolders = cached?.holders ?? [];
+      // The indexer stores a null pct whenever it had no total supply to divide
+      // by, so rows can exist with no share at all. Counting rows alone would
+      // drop the gap below and leave the page with neither a concentration
+      // signal nor a statement that concentration was never evaluated.
+      const concentrationEvaluated = storedHolders.some((holder) => holder.pct != null);
+      const creator = cached?.deployer ?? null;
+      // The holder index resolves the creator too, so an exact-address bridge
+      // link is available here without an explorer.
+      const bridgeLinks = creator
+        ? await prisma.bridgeTransferRow.findMany({
+            where: { OR: [{ recipient: creator }, { sender: creator }] },
+            orderBy: { observedAt: "desc" },
+            take: 10,
+          })
+        : [];
+
       const gaps = [
         {
           severity: "medium" as const,
           name: "No explorer for this network",
           detail:
-            "Holder distribution, creator address and source verification need an index. None is available, so they are unknown rather than clear.",
+            "Source verification needs an index. None is available, so verified source code is unknown rather than absent.",
         },
+        ...(concentrationEvaluated
+          ? []
+          : [{
+              severity: "medium" as const,
+              name: "Holder data unavailable",
+              detail: storedHolders.length
+                ? "The holder index has balances for this contract but no total supply to express them as shares, so concentration was not evaluated."
+                : "The holder index has not reconstructed this contract yet, so concentration was not evaluated.",
+            }]),
+        ...(creator
+          ? []
+          : [{
+              severity: "medium" as const,
+              name: "Creator unknown",
+              detail:
+                "The deploying account has not been resolved, so creator history was not checked.",
+            }]),
         ...(live.reachable
           ? []
           : [{
@@ -411,12 +502,37 @@ export async function observedMainnetRoutes(app: FastifyInstance) {
             }]),
       ];
 
-      const signals = [...gaps, ...live.signals];
+      const signals = [...gaps, ...concentrationSignals(storedHolders), ...live.signals];
       const order = { low: 0, medium: 1, high: 2, critical: 3 } as const;
       const strongest = signals.reduce<keyof typeof order>(
         (current, s) => (order[s.severity] > order[current] ? s.severity : current),
         "low"
       );
+
+      // A read the node answered is thrown away otherwise, so the next request
+      // through a throttled endpoint falls back to real values instead of null.
+      if (live.hasCode && (live.name || live.symbol || live.decimals != null || live.totalSupply)) {
+        await prisma.token
+          .upsert({
+            where: { chain_address: { chain: OBSERVED_ARC_CHAIN, address: stored } },
+            create: {
+              chain: OBSERVED_ARC_CHAIN,
+              address: stored,
+              name: live.name,
+              symbol: live.symbol,
+              decimals: live.decimals,
+              totalSupply: live.totalSupply,
+              standard: "ERC-20",
+            },
+            update: {
+              name: live.name ?? cached?.name ?? null,
+              symbol: live.symbol ?? cached?.symbol ?? null,
+              decimals: live.decimals ?? cached?.decimals ?? null,
+              totalSupply: live.totalSupply ?? cached?.totalSupply ?? null,
+            },
+          })
+          .catch(() => undefined);
+      }
 
       return {
         network: { name: "Observed Arc network", chainId: 5042, status: "unannounced" },
@@ -425,7 +541,7 @@ export async function observedMainnetRoutes(app: FastifyInstance) {
           source: "observed_arc_explorer",
           reason: explorer.configured ? "explorer_unreachable" : "explorer_not_configured",
           message:
-            "This network has no public explorer right now. Contract code and token metadata are read straight from the node; anything that needs an index is not available.",
+            "This network has no public explorer right now. Contract code and token metadata are read straight from the node and holder distribution comes from RiskHound's own index; source verification is not available at all.",
           rpcBlock: live.blockNumber,
           rpcError: live.error,
         },
@@ -435,12 +551,12 @@ export async function observedMainnetRoutes(app: FastifyInstance) {
           symbol: live.symbol ?? cached?.symbol ?? null,
           decimals: live.decimals ?? cached?.decimals ?? null,
           totalSupply: live.totalSupply ?? cached?.totalSupply ?? null,
-          holderCount: null,
+          holderCount: cached?.holderCount ?? null,
           standard: cached?.standard ?? "ERC-20",
           explorerUrl: explorer.tokenUrl(stored) || null,
         },
         contract: {
-          creator: cached?.deployer ?? null,
+          creator,
           creationTxHash: null,
           verified: false,
           verificationKnown: false,
@@ -451,14 +567,26 @@ export async function observedMainnetRoutes(app: FastifyInstance) {
           riskySelectors: live.selectors,
           explorerMetadataReliable: false,
         },
-        bridgeIntelligence: { linked: false, totalUsdc: 0, transfers: [], limitation: "Requires an explorer index." },
+        bridgeIntelligence: {
+          linked: bridgeLinks.length > 0,
+          totalUsdc: bridgeLinks.reduce((sum, row) => sum + row.amountUsdc, 0),
+          transfers: bridgeLinks.map((row) => ({
+            sourceTxHash: row.sourceTxHash,
+            amountUsdc: row.amountUsdc,
+            observedAt: row.observedAt.toISOString(),
+            sourceExplorerUrl: row.sourceExplorerUrl,
+          })),
+          limitation: creator
+            ? "Exact-address link only. It does not infer common ownership."
+            : "The deploying account is not resolved yet, so no link was checked.",
+        },
         fundingIntelligence: {
           observedFunder: null,
           linked: false,
           totalUsdc: 0,
           transfers: [],
           confidence: "unavailable",
-          limitation: "Requires an explorer index.",
+          limitation: "Tracing the creator's first funder needs a transaction index. None is available.",
         },
         riskAssessment: {
           level:
@@ -467,12 +595,17 @@ export async function observedMainnetRoutes(app: FastifyInstance) {
               : strongest === "high"
                 ? "high_risk"
                 : "caution",
-          confidence: "low",
+          confidence: concentrationEvaluated && creator ? "medium" : "low",
           signals,
           limitation:
-            "Read from the node without an index. Absence of a holder or creator signal here means it was not checked, not that it is clean.",
+            "Read from the node without an explorer. Absence of a signal here means it was not checked, not that it is clean.",
         },
-        holders: [],
+        holders: storedHolders.map((holder) => ({
+          address: holder.address,
+          balance: holder.balance,
+          pct: holder.pct,
+          labels: jparse<string[]>(holder.labelsJson, []),
+        })),
       };
     }
     const token = (await tokenResponse.json()) as ExplorerToken;

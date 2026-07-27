@@ -63,6 +63,50 @@ describe("getTokenHolders", () => {
   });
 });
 
+describe("getAllTokenHolders", () => {
+  it("stops and reports truncation when the cursor stops advancing", async () => {
+    // A stalled keyset would otherwise be walked to maxPages, counting the same
+    // holder once per page and overstating concentration.
+    mockFetch(() => ({
+      body: {
+        items: [{ address: { hash: "0xAAA" }, value: "10" }],
+        next_page_params: { value: "10" },
+      },
+    }));
+    const res = await client.getAllTokenHolders("0xabc");
+    expect(res.items).toHaveLength(1);
+    expect(res.complete).toBe(false);
+    expect(seen).toHaveLength(2);
+  });
+
+  it("keeps one row per holder when pages overlap", async () => {
+    let page = 0;
+    mockFetch(() => {
+      page++;
+      if (page === 1) {
+        return {
+          body: {
+            items: [{ address: { hash: "0xAAA" }, value: "10" }],
+            next_page_params: { value: "10" },
+          },
+        };
+      }
+      return {
+        body: {
+          items: [
+            { address: { hash: "0xaaa" }, value: "10" },
+            { address: { hash: "0xBBB" }, value: "5" },
+          ],
+          next_page_params: null,
+        },
+      };
+    });
+    const res = await client.getAllTokenHolders("0xabc");
+    expect(res.items).toHaveLength(2);
+    expect(res.complete).toBe(true);
+  });
+});
+
 describe("getContractCreation", () => {
   it("does not read a character out of the module API error string", async () => {
     mockFetch(() => ({ body: { status: "0", message: "NOTOK", result: "No data found" } }));

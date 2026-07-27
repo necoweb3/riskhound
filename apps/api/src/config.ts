@@ -31,7 +31,6 @@ export const config = {
     .split(",")
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean),
-  freeAnalysesPerDay: Number(process.env.FREE_ANALYSES_PER_DAY ?? 10),
   freeRpm: Number(process.env.FREE_API_REQUESTS_PER_MINUTE ?? 30),
   riskModelVersion: process.env.RISK_MODEL_VERSION ?? "1.0.0",
   networks: loadNetworksFromEnv(),

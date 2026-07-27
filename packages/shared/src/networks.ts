@@ -1,7 +1,6 @@
 /**
  * Central network configuration.
  * Arc mainnet is NOT active. Do not pretend it is.
- * Payment network is independent of analysis networks.
  */
 
 export type NetworkKey = "arc_testnet" | "arc_observed" | "robinhood" | "base" | "base_sepolia";
@@ -11,7 +10,6 @@ export interface NetworkConfig {
   name: string;
   chainId: number;
   isTestnet: boolean;
-  isPaymentNetwork: boolean;
   isAnalysisNetwork: boolean;
   nativeCurrency: {
     name: string;
@@ -58,7 +56,6 @@ export function loadNetworksFromEnv(env: NodeJS.ProcessEnv = process.env): Recor
       name: "Arc Testnet",
       chainId: Number(env.ARC_CHAIN_ID ?? 5042002),
       isTestnet: true,
-      isPaymentNetwork: true,
       isAnalysisNetwork: true,
       nativeCurrency: { name: "USD Coin", symbol: "USDC", decimals: 18 },
       rpcUrl: env.ARC_RPC_URL ?? "https://rpc.drpc.testnet.arc.network",
@@ -86,7 +83,6 @@ export function loadNetworksFromEnv(env: NodeJS.ProcessEnv = process.env): Recor
       name: "Observed Arc network",
       chainId: Number(env.OBSERVED_ARC_CHAIN_ID ?? 5042),
       isTestnet: false,
-      isPaymentNetwork: false,
       isAnalysisNetwork: false,
       nativeCurrency: { name: "USD Coin", symbol: "USDC", decimals: 18 },
       // thirdweb's keyless endpoint works from a laptop but can be refused
@@ -111,7 +107,6 @@ export function loadNetworksFromEnv(env: NodeJS.ProcessEnv = process.env): Recor
       name: "Robinhood Chain",
       chainId: Number(env.ROBINHOOD_CHAIN_ID ?? 4663),
       isTestnet: false,
-      isPaymentNetwork: false,
       isAnalysisNetwork: false,
       nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
       rpcUrl: env.ROBINHOOD_RPC_URL ?? "",
@@ -127,7 +122,6 @@ export function loadNetworksFromEnv(env: NodeJS.ProcessEnv = process.env): Recor
       name: "Base",
       chainId: Number(env.PAYMENT_CHAIN_ID ?? 8453),
       isTestnet: false,
-      isPaymentNetwork: true,
       isAnalysisNetwork: false,
       nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
       rpcUrl: env.PAYMENT_RPC_URL ?? "https://mainnet.base.org",
@@ -142,7 +136,6 @@ export function loadNetworksFromEnv(env: NodeJS.ProcessEnv = process.env): Recor
       name: "Base Sepolia",
       chainId: 84532,
       isTestnet: true,
-      isPaymentNetwork: true,
       isAnalysisNetwork: false,
       nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
       rpcUrl: "https://sepolia.base.org",
@@ -157,15 +150,6 @@ export function loadNetworksFromEnv(env: NodeJS.ProcessEnv = process.env): Recor
 
 export function getAnalysisNetworks(networks = loadNetworksFromEnv()) {
   return Object.values(networks).filter((n) => n.isAnalysisNetwork);
-}
-
-export function getPaymentNetwork(networks = loadNetworksFromEnv()): NetworkConfig {
-  const key = (process.env.PAYMENT_NETWORK ?? "base") as NetworkKey;
-  const network = networks[key];
-  if (!network || !network.isPaymentNetwork || !network.usdcAddress) {
-    throw new Error(`Unsupported PAYMENT_NETWORK: ${key}`);
-  }
-  return network;
 }
 
 export function explorerAddressUrl(network: NetworkConfig, address: string) {

@@ -2,6 +2,7 @@ import Link from "next/link";
 import {
   apiGet,
   getApiUrl,
+  REQUEST_TIMEOUT_MS,
   categoryLabel,
   friendlySignal,
   shortAddr,
@@ -113,20 +114,22 @@ async function loadToken(addr: string): Promise<{ data?: TokenPayload; err?: str
 
     // A stale cache must not make every visitor wait on a full re-analysis, so
     // the refresh is queued and the stored report is rendered straight away.
-    let queued = false;
+    // The enqueue is not awaited: it costs two explorer round trips before the
+    // job is even accepted, and its only screen effect is a chip the cached
+    // payload already answers through analysisPending.
     if (cached.stale) {
-      try {
-        const res = await fetch(`${getApiUrl()}/tokens/${addr}/analyze`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ async: true, force: true }),
-          cache: "no-store",
-          signal: AbortSignal.timeout(4000),
+      void fetch(`${getApiUrl()}/tokens/${addr}/analyze`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ async: true, force: true }),
+        cache: "no-store",
+        signal: AbortSignal.timeout(4000),
+      })
+        // Nothing reads the reply, but an unread body holds its socket open.
+        .then((res) => res.body?.cancel())
+        .catch(() => {
+          /* keep cache */
         });
-        queued = res.ok && ((await res.json()) as { queued?: boolean }).queued === true;
-      } catch {
-        /* keep cache */
-      }
     }
 
     return {
@@ -138,17 +141,25 @@ async function loadToken(addr: string): Promise<{ data?: TokenPayload; err?: str
         simulation: cached.simulation,
         stale: cached.stale,
         analysisUpdatedAt: cached.analysisUpdatedAt,
-        analysisPending: cached.analysisPending || queued,
-        explorerAddress: `https://testnet.arcscan.app/address/${addr}`,
+        analysisPending: cached.analysisPending,
+        // Prefer whatever the API resolved against its own configured explorer
+        // so the header cannot point somewhere else than the evidence links do.
+        // GET /tokens/:address does not return it yet, so the literal is still
+        // what renders today.
+        explorerAddress: cached.explorerAddress ?? `https://testnet.arcscan.app/address/${addr}`,
       },
     };
   } catch {
     try {
+      // This body runs the analysis inline rather than queueing it, so it needs
+      // the same ceiling apiGet puts on a render: an unbounded wait here pins a
+      // render slot for as long as the pipeline takes.
       const res = await fetch(`${getApiUrl()}/tokens/${addr}/analyze`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({}),
         cache: "no-store",
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
       const live = await res.json();
       if (!res.ok) {
@@ -158,6 +169,9 @@ async function loadToken(addr: string): Promise<{ data?: TokenPayload; err?: str
       }
       return { data: fromLive(live) };
     } catch (e) {
+      if (e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError")) {
+        return { err: "The analysis service did not respond in time. Please try again." };
+      }
       return { err: e instanceof Error ? e.message : "Could not load token" };
     }
   }

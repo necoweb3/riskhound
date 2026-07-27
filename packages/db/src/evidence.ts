@@ -1,3 +1,4 @@
+import { Prisma } from "@prisma/client";
 import { prisma } from "./index.js";
 import { jstr } from "./json.js";
 
@@ -13,6 +14,7 @@ function addressFromNode(id: string) {
 
 export async function persistEvidenceGraph(graph: EvidenceGraph, chain = "arc_testnet") {
   const nodes = new Map(graph.nodes.map((node) => [node.id, node]));
+  const writes: Prisma.PrismaPromise<unknown>[] = [];
   for (const edge of graph.edges) {
     const source = addressFromNode(edge.source);
     const target = addressFromNode(edge.target);
@@ -21,25 +23,30 @@ export async function persistEvidenceGraph(graph: EvidenceGraph, chain = "arc_te
     const targetNode = nodes.get(edge.target);
     const fingerprint = `${chain}:${source}:${target}:${edge.type}`.toLowerCase();
     const confidence = edge.strength === "definitive" || edge.strength === "strong" ? "high" : "medium";
-    await prisma.graphEdgeRow.upsert({
-      where: { fingerprint },
-      create: {
-        fingerprint,
-        sourceId: source,
-        targetId: target,
-        sourceType: sourceNode?.type ?? "address",
-        targetType: targetNode?.type ?? "address",
-        edgeType: edge.type,
-        strength: edge.strength,
-        chain,
-        confidence,
-        evidenceJson: jstr(edge.evidence),
-        label: edge.label,
-        serviceExcluded: false,
-      },
-      update: { strength: edge.strength, confidence, evidenceJson: jstr(edge.evidence), label: edge.label },
-    });
+    writes.push(
+      prisma.graphEdgeRow.upsert({
+        where: { fingerprint },
+        create: {
+          fingerprint,
+          sourceId: source,
+          targetId: target,
+          sourceType: sourceNode?.type ?? "address",
+          targetType: targetNode?.type ?? "address",
+          edgeType: edge.type,
+          strength: edge.strength,
+          chain,
+          confidence,
+          evidenceJson: jstr(edge.evidence),
+          label: edge.label,
+          serviceExcluded: false,
+        },
+        update: { strength: edge.strength, confidence, evidenceJson: jstr(edge.evidence), label: edge.label },
+      })
+    );
   }
+  // One round trip instead of one per edge. The batch still runs in order, so
+  // two edges sharing a fingerprint settle to the last one as before.
+  if (writes.length) await prisma.$transaction(writes);
 }
 
 /**
@@ -81,54 +88,111 @@ export async function persistAutomaticRiskEvents(input: {
   tokenAddress: string;
   chain: string;
   findings: { id: string; category: string; name: string; summary: string; severity: string; controllerAddress?: string; evidence: unknown[] }[];
+  /**
+   * The risk categories this run read end to end, when `findings` is everything
+   * the run scored. Absence is only evidence that a signal stopped firing when
+   * the list it is absent from is complete and its category was readable: for a
+   * category the run could not read, absence is a gap, and closing an event on
+   * it would report an outage as the risk having ended. Null when the finding
+   * list was truncated, which refreshes events but resolves none.
+   */
+  completeCategories?: string[] | null;
 }) {
+  // One read for the token instead of a findFirst per finding. Rows written
+  // before the dedupe existed can still be duplicated, so the oldest match wins
+  // as it did before.
+  const open = await prisma.riskEvent.findMany({
+    where: { chain: input.chain, tokenAddress: input.tokenAddress, autoDetected: true },
+    orderBy: { occurredAt: "asc" },
+  });
+  const byTitle = new Map<string, (typeof open)[number]>();
+  for (const row of open) {
+    if (!byTitle.has(row.title)) byTitle.set(row.title, row);
+  }
+
+  const reproduced = new Set<string>();
+  const writes: Prisma.PrismaPromise<unknown>[] = [];
+
   for (const finding of input.findings.filter((f) => f.severity === "critical" || f.severity === "high")) {
+    if (reproduced.has(finding.name)) continue;
+    reproduced.add(finding.name);
     // An unmapped category is a gap in this table, not a licence to guess.
     const eventClass = EVENT_CLASS_BY_CATEGORY[finding.category] ?? "insufficient_evidence";
     // No time window: a token that stays flagged for the same reason used to
     // gain one identical row per day forever. The open automatic event is
     // refreshed instead so the feed keeps one row per distinct finding.
-    const existing = await prisma.riskEvent.findFirst({
-      where: {
-        chain: input.chain,
-        tokenAddress: input.tokenAddress,
-        title: finding.name,
-        autoDetected: true,
-      },
-      // Rows written before this dedupe existed can still be duplicated, so the
-      // refresh is pinned to the oldest match rather than an arbitrary one.
-      orderBy: { occurredAt: "asc" },
-    });
+    const existing = byTitle.get(finding.name);
     if (existing) {
       // "confirmed" and "rejected" are the reviewed states. Rewriting the
       // detail or evidence underneath a reviewer's decision would leave it
       // standing on proof nobody looked at, and a degraded run that produced no
       // evidence refs would strip the proof from a confirmed event entirely.
       const reviewed = existing.manualStatus === "confirmed" || existing.manualStatus === "rejected";
-      if (!reviewed) {
-        await prisma.riskEvent.update({
+      if (reviewed) {
+        // A reviewed row only has its resolution cleared: the signal firing
+        // again is a fact about the detector, not about the review.
+        if (existing.resolvedAt) {
+          writes.push(prisma.riskEvent.update({ where: { id: existing.id }, data: { resolvedAt: null } }));
+        }
+        continue;
+      }
+      writes.push(
+        prisma.riskEvent.update({
           where: { id: existing.id },
           // occurredAt is left alone so it still records the first observation.
-          data: { detail: finding.summary, evidenceJson: jstr(finding.evidence), eventClass },
-        });
-      }
+          data: { detail: finding.summary, evidenceJson: jstr(finding.evidence), eventClass, resolvedAt: null },
+        })
+      );
       continue;
     }
-    await prisma.riskEvent.create({
-      data: {
-        chain: input.chain,
-        eventClass,
-        title: finding.name,
-        detail: finding.summary,
-        tokenId: input.tokenId,
-        tokenAddress: input.tokenAddress,
-        addressesJson: jstr([input.tokenAddress, finding.controllerAddress].filter(Boolean)),
-        confidence: "medium",
-        autoDetected: true,
-        manualStatus: "pending",
-        evidenceJson: jstr(finding.evidence),
-        occurredAt: new Date(),
-      },
-    });
+    writes.push(
+      prisma.riskEvent.create({
+        data: {
+          chain: input.chain,
+          eventClass,
+          title: finding.name,
+          detail: finding.summary,
+          tokenId: input.tokenId,
+          tokenAddress: input.tokenAddress,
+          addressesJson: jstr([input.tokenAddress, finding.controllerAddress].filter(Boolean)),
+          confidence: "medium",
+          autoDetected: true,
+          manualStatus: "pending",
+          evidenceJson: jstr(finding.evidence),
+          occurredAt: new Date(),
+        },
+      })
+    );
   }
+
+  // An event whose finding is no longer produced used to keep its original
+  // detail and occurredAt on the public feed indefinitely, presenting a
+  // measurement that no longer holds as current risk. The row is marked rather
+  // than deleted so a reviewer's decision survives beside the lapse.
+  if (input.completeCategories?.length) {
+    const complete = new Set(input.completeCategories);
+    // The row records the event class, not the category that produced it, and
+    // several categories map onto one class, so a class may only be resolved
+    // when every category that can produce it was readable this run.
+    const unread = new Set<EventClass>();
+    for (const [category, eventClass] of Object.entries(EVENT_CLASS_BY_CATEGORY)) {
+      if (!complete.has(category)) unread.add(eventClass);
+    }
+    const lapsed = open.filter(
+      (row) =>
+        !reproduced.has(row.title) &&
+        row.resolvedAt == null &&
+        !unread.has(row.eventClass as EventClass)
+    );
+    if (lapsed.length) {
+      writes.push(
+        prisma.riskEvent.updateMany({
+          where: { id: { in: lapsed.map((row) => row.id) } },
+          data: { resolvedAt: new Date() },
+        })
+      );
+    }
+  }
+
+  if (writes.length) await prisma.$transaction(writes);
 }

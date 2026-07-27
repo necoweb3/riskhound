@@ -20,7 +20,10 @@ export async function watchRoutes(app: FastifyInstance) {
   app.get("/watchlist", async (req, reply) => {
     const wallet = authenticatedAddress(req.headers);
     if (!wallet || !normalizeAddress(wallet)) {
-      return reply.code(401).send({ error: "wallet_required", message: "Provide X-Wallet-Address header" });
+      return reply.code(401).send({
+        error: "wallet_required",
+        message: "Provide Authorization: Bearer <session token> from POST /auth/verify",
+      });
     }
     const user = await ensureUser(wallet);
     // Capped listing, so the count says how much of the watchlist is shown.

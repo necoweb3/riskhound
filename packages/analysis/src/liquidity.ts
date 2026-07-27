@@ -6,6 +6,7 @@ import type {
   TimelineEvent,
 } from "@rugkiller/shared";
 import type { BlockscoutClient } from "@rugkiller/chain";
+import type { PreloadedTransfers } from "./holders.js";
 
 /**
  * Liquidity analysis using explorer transfer/log heuristics.
@@ -16,6 +17,14 @@ export async function analyzeLiquidity(opts: {
   token: string;
   explorer: BlockscoutClient;
   deployer?: string | null;
+  /**
+   * Token exchange rate already read for this token earlier in the same
+   * analysis. Supplied (even as null) means the token page was fetched
+   * elsewhere and must not be fetched a second time.
+   */
+  exchangeRate?: string | null;
+  /** Transfer page already read for this token earlier in the same analysis. */
+  transfers?: PreloadedTransfers;
 }): Promise<{ snapshot: LiquiditySnapshot; findings: RiskFinding[]; errors: string[] }> {
   const findings: RiskFinding[] = [];
   const errors: string[] = [];
@@ -26,19 +35,29 @@ export async function analyzeLiquidity(opts: {
 
   // Discover pairs via token transfers involving known pair-like contracts is hard without registry.
   // Use token page exchange data if present + transfer patterns labeled Mint/Burn if decoded.
-  try {
-    const token = await opts.explorer.getToken(opts.token);
-    if (token?.exchange_rate) {
-      notes.push(`Explorer exchange_rate=${token.exchange_rate}`);
+  if (opts.exchangeRate !== undefined) {
+    if (opts.exchangeRate) notes.push(`Explorer exchange_rate=${opts.exchangeRate}`);
+  } else {
+    try {
+      const token = await opts.explorer.getToken(opts.token);
+      if (token?.exchange_rate) {
+        notes.push(`Explorer exchange_rate=${token.exchange_rate}`);
+      }
+    } catch (e) {
+      errors.push(`token: ${e instanceof Error ? e.message : String(e)}`);
     }
-  } catch (e) {
-    errors.push(`token: ${e instanceof Error ? e.message : String(e)}`);
   }
 
-  try {
-    const transfers = await opts.explorer.getTokenTransfers(opts.token);
+  const transfersResult: PreloadedTransfers = opts.transfers
+    ? opts.transfers
+    : await opts.explorer
+        .getTokenTransfers(opts.token)
+        .then((page) => ({ ok: true as const, page }))
+        .catch((e) => ({ ok: false as const, error: e instanceof Error ? e.message : String(e) }));
+
+  if (transfersResult.ok) {
     let i = 0;
-    for (const t of transfers.items ?? []) {
+    for (const t of transfersResult.page.items ?? []) {
       const method = (t.method ?? t.type ?? "").toLowerCase();
       const tx = t.transaction_hash;
       // The chain timestamp is the only honest value here. Falling back to the
@@ -77,8 +96,8 @@ export async function analyzeLiquidity(opts: {
       }
       i++;
     }
-  } catch (e) {
-    errors.push(`transfers: ${e instanceof Error ? e.message : String(e)}`);
+  } else {
+    errors.push(`transfers: ${transfersResult.error}`);
   }
 
   if (pools.length === 0) {

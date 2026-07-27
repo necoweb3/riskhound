@@ -46,7 +46,11 @@ export async function agentRoutes(app: FastifyInstance) {
     const norm = normalizeAddress(body.token ?? body.wallet!);
     if (!norm) return reply.code(400).send({ error: "invalid_address" });
 
-    const result = await analyzeToken({ address: norm });
+    // Confirmed outside-chain events are the only source of creator-history
+    // links, so a query that answers on relatedEventIds has to load them or it
+    // reports "no history" for every token.
+    const events = await loadRhRiskEventsForAddresses([]);
+    const result = await analyzeToken({ address: norm, rhRiskEvents: events });
     const d = result.detail;
     const report = result.report;
 
@@ -172,7 +176,8 @@ export async function agentRoutes(app: FastifyInstance) {
     const body = z.object({ address: z.string() }).parse(req.body);
     const norm = normalizeAddress(body.address);
     if (!norm) return reply.code(400).send({ error: "invalid_address" });
-    const result = await analyzeToken({ address: norm, skipSimulation: true });
+    const events = await loadRhRiskEventsForAddresses([]);
+    const result = await analyzeToken({ address: norm, skipSimulation: true, rhRiskEvents: events });
     return { graph: result.graph, links: result.detail.crossChainLinks };
   });
 
