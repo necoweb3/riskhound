@@ -32,6 +32,11 @@ type Finding = {
   relatedFunction?: string;
   evidenceJson?: Evidence[];
   evidence?: Evidence[];
+  /** Set once a later run stopped reproducing the signal. */
+  retiredAt?: string | null;
+  /** A reviewer's decision. It outranks the automatic detection on screen. */
+  manualDecision?: string | null;
+  manualReason?: string | null;
 };
 
 type TokenPayload = {
@@ -415,11 +420,22 @@ export default async function TokenPage({ params }: { params: Promise<{ address:
               <article key={f.id ?? i} className={`rk-finding rk-finding--${f.severity || "info"}`} style={{ border: 0, borderRadius: 0, borderBottom: "1px solid var(--line)", borderLeftWidth: 3 }}>
                 <div className="rk-between">
                   <strong style={{ fontSize: 13.5 }}>{friendlySignal(f.name)}</strong>
-                  <span className={`rk-badge rk-badge--${f.severity === "critical" ? "critical" : f.severity === "high" ? "high" : f.severity === "medium" ? "caution" : "ok"}`}>
-                    {severityLabel(f.severity)}
+                  <span className="rk-row" style={{ gap: 6 }}>
+                    {/* A signal the detector no longer reproduces, or one a
+                        reviewer has ruled on, must not read as current. */}
+                    {f.retiredAt && <span className="rk-chip">No longer detected</span>}
+                    {f.manualDecision && <span className="rk-chip">Reviewed: {f.manualDecision}</span>}
+                    <span className={`rk-badge rk-badge--${f.severity === "critical" ? "critical" : f.severity === "high" ? "high" : f.severity === "medium" ? "caution" : "ok"}`}>
+                      {severityLabel(f.severity)}
+                    </span>
                   </span>
                 </div>
                 <p>{friendlySignal(f.summary)}</p>
+                {f.manualReason && (
+                  <p className="rk-faint" style={{ fontSize: 12.5 }}>
+                    Reviewer note: {f.manualReason}
+                  </p>
+                )}
                 {f.whyItMatters && (
                   <p className="rk-faint" style={{ fontSize: 12.5 }}>
                     <span style={{ color: "var(--text-4)" }}>Why it matters: </span>{f.whyItMatters}

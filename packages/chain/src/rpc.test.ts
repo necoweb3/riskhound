@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { toFunctionSelector } from "viem";
-import { detectProxyHints, RISK_SELECTORS, scanSelectors, STANDARD_SELECTORS } from "./rpc.js";
+import {
+  detectProxyHints,
+  RISK_SELECTORS,
+  scanSelectors,
+  scanStandardSelectors,
+  STANDARD_SELECTORS,
+} from "./rpc.js";
 
 describe("selector tables", () => {
   it("keys every entry by the hash of its own signature", () => {
@@ -67,5 +73,43 @@ describe("bytecode scanning", () => {
     const code = ("0x" + slot) as `0x${string}`;
     const r = detectProxyHints(code);
     expect(r.isProxy).toBe(true);
+  });
+});
+
+/**
+ * arcDiscovery decides whether a freshly created contract is an ERC-20 by
+ * scanning for these three entry points. They are ordinary ERC-20 functions,
+ * so they belong in the standard table; when they were moved out of the
+ * privileged one, the caller kept scanning the privileged table and discovery
+ * silently found zero tokens with nothing reporting a gap.
+ */
+describe("ERC-20 discovery selectors", () => {
+  const ERC20_ENTRY_POINTS = {
+    a9059cbb: "transfer(address,uint256)",
+    "70a08231": "balanceOf(address)",
+    "18160ddd": "totalSupply()",
+  } as const;
+
+  it("resolves every entry point discovery tests for", () => {
+    for (const [selector, signature] of Object.entries(ERC20_ENTRY_POINTS)) {
+      expect(STANDARD_SELECTORS[selector], `${signature} must be scannable`).toBe(signature);
+    }
+  });
+
+  it("keeps plain ERC-20 entry points out of the privileged table", () => {
+    // Reporting transfer() as a privileged function would invent evidence.
+    for (const selector of Object.keys(ERC20_ENTRY_POINTS)) {
+      expect(RISK_SELECTORS[selector]).toBeUndefined();
+    }
+  });
+
+  it("finds them in bytecode through scanStandardSelectors", () => {
+    // PUSH4 <selector>, which is how a dispatcher routes to one.
+    const code = ("0x" + Object.keys(ERC20_ENTRY_POINTS).map((s) => `63${s}`).join("")) as `0x${string}`;
+    const found = scanStandardSelectors(code).map((s) => s.selector);
+    for (const selector of Object.keys(ERC20_ENTRY_POINTS)) {
+      expect(found).toContain(selector);
+    }
+    expect(scanSelectors(code)).toHaveLength(0);
   });
 });

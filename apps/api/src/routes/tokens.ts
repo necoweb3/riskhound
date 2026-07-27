@@ -200,6 +200,13 @@ export async function tokenRoutes(app: FastifyInstance) {
         relatedFunction: f.relatedFunction,
         controllerAddress: f.controllerAddress,
         evidence: jparse(f.evidenceJson, []),
+        // A reviewed row survives re-analysis, so the reviewer's decision and
+        // whether the detector still reproduces the signal both have to reach
+        // the page. Without these a retired or dismissed finding is served as
+        // a current one.
+        retiredAt: f.retiredAt?.toISOString() ?? null,
+        manualDecision: f.manualDecision,
+        manualReason: f.manualReason,
       })),
       holders: row.holders.map((h) => ({
         address: h.address,

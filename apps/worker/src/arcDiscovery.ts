@@ -1,4 +1,4 @@
-import { getArcClients, getCode, scanSelectors } from "@rugkiller/chain";
+import { getArcClients, getCode, scanStandardSelectors } from "@rugkiller/chain";
 import { discoverRecentApexiPairs } from "@rugkiller/analysis";
 import { prisma } from "@rugkiller/db";
 import type { Address, Hex } from "viem";
@@ -294,8 +294,12 @@ export async function runArcDiscovery(): Promise<string[]> {
             const code = await getCode(rpcClient, created as Address);
             if (!code || code === "0x" || code.length < 20) continue;
 
-            // Must look like ERC-20 (transfer + balanceOf or totalSupply selectors)
-            const sels = scanSelectors(code as Hex).map((s) => s.selector);
+            // Must look like ERC-20 (transfer, balanceOf or totalSupply).
+            // These are ordinary ERC-20 entry points, so they live in the
+            // standard table, not the privileged one scanSelectors reads.
+            // Scanning the wrong table made this test permanently false and
+            // discovery silently found nothing.
+            const sels = scanStandardSelectors(code as Hex).map((s) => s.selector);
             const looksErc20 =
               sels.includes("a9059cbb") || // transfer
               sels.includes("70a08231") || // balanceOf
